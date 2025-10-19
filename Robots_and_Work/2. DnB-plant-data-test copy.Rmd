@@ -1,0 +1,658 @@
+---
+title: "Dun and Bradstreet plant-level dataset"
+#output: html_notebook
+---
+
+This file contains the script to generate plant-level Dun and Bradstreet data. It produces a file named `duns.imp.rds`.
+
+# Required libraries and custom functions
+
+```{r libraries, include=FALSE}
+# Packages to install and load
+packages <- c(
+  "data.table", # Used throughout the file
+  "haven",      # read_dta()
+  "readxl",     # read_excel()
+  "tidyr",      # Used throughout the file
+  "zoo",        # na.locf()
+  "stringr",    # str_pad()
+  "dplyr"       # Used throughout the file
+)
+
+# Install and load packages
+install_and_load <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+  }
+  library(package, character.only = TRUE)
+}
+
+# Apply the function
+invisible(lapply(packages, install_and_load))
+
+# Custom functions
+source("custom_functions/impute_data.R") # Used in `imputation`
+```
+
+# Loading datasets
+
+```{r datasets, include=FALSE}
+# ==================
+# Dun and Bradstreet
+# ==================
+## The files below contains 18,411,058 establishment-year data from 2,473,124 establishments in the manufacturing sector from 2003 to 2024.
+## An establishment is defined as a unique DUNS number.
+
+# Define folder path
+path  <- "../data/Duns and Bradstreet/"
+
+# Identify files in the folder
+files <- list.files(path = path)
+
+# Create an empty table to store data
+duns <- data.table()
+
+# Load files
+for (i in files){
+  # Status message
+  cat(paste0("\rProcessing file ", i, "\r"))
+  
+  # Read file and store it on `duns`
+  duns <- rbind(duns, fread(paste0(path, i)))
+}
+
+# =====================
+# Supplemental datasets
+# =====================
+
+# SIC to NAICS crosswalk
+## Source: https://www.naics.com/sic-naics-crosswalk-search-results
+sic_to_naics <- fread("../data/SIC4_to_NAICS6_naics.com.csv", colClasses = c("integer", "character", "integer", "character"))
+
+# State abbreviation
+## This file contains a list of U.S. States and their abbreviations
+State_abbreviation <- fread("../data/State_abbreviation.csv")
+
+# Zip code
+# Source: https://www.unitedstateszipcodes.org/zip-code-database/
+# Download Personal Free (will need to enter email address)
+zipcode     <- data.table(read_excel("../data/zip_code_database.xlsx", sheet = "data"))
+
+# 1990 Commuting Zones
+# Source: https://usa.ipums.org/usa/volii/1990LMAascii.txt
+county_cz   <- fread("../data/IPUMS/1990LMAascii.txt")
+
+# Commuting zone-level variables
+## `workfile5015.dta` contains each commuting zone's population of working age and average hourly wage
+### Source: https://www.openicpsr.org/openicpsr/project/116495/version/V1/view;jsessionid=42CCA589332B47E0BC41BDEB6E54B345?path=/openicpsr/116495/fcr:versions/V1/dta
+### Autor, David H. “Work of the Past, Work of the Future.” AEA Papers and Proceedings 109 (May 2019): 1–32. https://doi.org/10.1257/pandp.20191110.
+autor <- read_dta("../data/workfile5015.dta")
+
+# Producer Price Index by Industry: Total Manufacturing Industries (PCUOMFGOMFG)
+## Source: https://fred.stlouisfed.org/series/PCUOMFGOMFG
+mfgPPI       <- fread("../data/PCUOMFGOMFG.csv")
+
+## Add year and month variables
+mfgPPI[, `:=` (Year  = year(`observation_date`), 
+               Month = month(`observation_date`))]
+
+## Restrict to December of each year data
+annualPPI    <- mfgPPI[Month==12]
+
+## Calculate index to convert nominal value to 2024 value
+annualPPI[, `:=` (real_value_2024 = annualPPI[Year==2024]$PCUOMFGOMFG/PCUOMFGOMFG)]
+
+# =============================
+# Files created in this project
+# =============================
+# Latest file version
+loadpath <- "../data/created-here/latest/"
+
+# From `bgt-duns-matching.Rmd`
+## Panjiva
+panjiva.shipment.year.duns <- readRDS(paste0(loadpath, "panjiva.shipment.year.duns", ".rds")) # Panjiva plant-year panel data 
+panjiva.shipment.duns      <- readRDS(paste0(loadpath, "panjiva.shipment.duns", ".rds"))      # Panjiva plant-level data
+
+## Dun and Bradstreet
+duns_firms <- readRDS(paste0(loadpath, "duns_firms", ".rds")) # Dun and Bradstreet firm-level data 
+duns.plant <- readRDS(paste0(loadpath, "duns.plant", ".rds")) # Dun and Bradstreet plant-level data
+
+## BGT
+bgt.plant          <- readRDS(paste0(loadpath, "bgt.plant", ".rds"))          # BGT plant-level data
+bgt.names          <- readRDS(paste0(loadpath, "bgt.names", ".rds"))          # BGT firm-name data
+bgt.plant.year.imp <- readRDS(paste0(loadpath, "bgt.plant.year.imp", ".rds")) # Imputed BGT plant-year data
+```
+
+# Imputation
+
+```{r imputation}
+# Impute missing years
+## Generate missing years
+periods <- duns[, .(YEAR = seq(min(YEAR), max(YEAR))), by = DUNSNO] # 19,358,199
+
+## Merge with `duns`
+duns <- merge(periods, duns, by = c("DUNSNO", "YEAR"), all.x = TRUE) # 19,358,199
+
+## Sort by company and year
+setorder(duns, DUNSNO, YEAR)
+
+## Columns to be filled
+cols <- c("COMPANYNAME", "STREETADDRESS", "CITY", "STATE", "ZIPCODE", 
+          "SMSACODE", "YEARSTARTED", "SIC1", "SUBSIDIARYINDICATOR", "HQDUNSNO", 
+          "PARENTDUNSNO", "BUSINESSDESCRIPTION", "MANUFACTURING")
+
+## Imputate values with value from the last available year
+duns[, (cols) := lapply(.SD, zoo::na.locf, na.rm = FALSE), .SDcols = cols, by = DUNSNO]
+
+# Impute missing values with linear interpolation between two nearest non-missing years
+duns <- impute_data(
+  duns, 
+  id.var      = "DUNSNO", 
+  impute.var  = c("SLS", "EMPLOYEESTHISSITE", "EMPLOYEESALLSITES"), 
+  period      = "YEAR", 
+  method      = "linear",
+  impute.zero = TRUE
+)
+
+# Impute remaining missing values with simple mean 
+## Because all DUNSNO with two non-missing values to fill in missing values have been used, this effectively taking the nearest available value for the remaining DUNSNO.
+## For DUNSNO with no non-missing value from any year, values in all years will be NA.
+duns <- impute_data(
+  duns, 
+  id.var      = "DUNSNO", 
+  impute.var  = c("SLS_linear", "EMPLOYEESTHISSITE_linear", "EMPLOYEESALLSITES_linear"), 
+  period      = "YEAR", 
+  method      = "mean",
+  impute.zero = TRUE
+)
+
+# Impute back to _linear
+duns[, `:=` (SLS_linear               = ifelse(is.na(SLS_linear), SLS_linear_mean, SLS_linear), 
+             EMPLOYEESTHISSITE_linear = ifelse(is.na(EMPLOYEESTHISSITE_linear), EMPLOYEESTHISSITE_linear_mean, EMPLOYEESTHISSITE_linear), 
+             EMPLOYEESALLSITES_linear = ifelse(is.na(EMPLOYEESALLSITES_linear), EMPLOYEESALLSITES_linear_mean, EMPLOYEESALLSITES_linear))]
+
+# Remove duplicated columns
+duns <- duns[, !c("SLS_linear_mean", "EMPLOYEESTHISSITE_linear_mean", "EMPLOYEESALLSITES_linear_mean")]
+
+# Convert sales to 2024 value
+duns[annualPPI, 
+     on = .(YEAR = Year), 
+     `:=` (ppi                = i.real_value_2024,
+           realSLS2024_linear = i.real_value_2024*SLS_linear)]
+
+# Round the values
+duns[, `:=` (EMPLOYEESTHISSITE_linear = round(EMPLOYEESTHISSITE_linear),
+             EMPLOYEESALLSITES_linear = round(EMPLOYEESALLSITES_linear),
+             realSLS2024_linear       = round(realSLS2024_linear))]
+
+# Add log form of employment and sales
+duns[, `:=` (logEmp_linear    = log(EMPLOYEESTHISSITE_linear),
+             logEmpAll_linear = log(EMPLOYEESALLSITES_linear),
+             logSales         = log(realSLS2024_linear))]
+```
+
+# Control variables
+
+```{r controls}
+# Get manufacturing NAICS codes
+duns[sic_to_naics[SIC_Code %between% c(2000, 3999) & NAICS_Code %between% c(300000, 399999)], 
+     on = .(SIC1 = SIC_Code), 
+     `:=` (NAICS6 = i.NAICS_Code, 
+           NAICS5 = str_sub(i.NAICS_Code, 1, 5),
+           NAICS4 = str_sub(i.NAICS_Code, 1, 4),
+           NAICS3 = str_sub(i.NAICS_Code, 1, 3))]
+
+# Annual growth
+duns <- duns[order(DUNSNO, YEAR)][, `:=` (employment_growth = (EMPLOYEESTHISSITE_linear - shift(EMPLOYEESTHISSITE_linear)) / shift(EMPLOYEESTHISSITE_linear),
+                                          sales_growth      = (realSLS2024_linear - shift(realSLS2024_linear)) / shift(realSLS2024_linear)), 
+                                  by = DUNSNO]
+
+# Plant variables
+## Note that we use the original EMPLOYEESTHISSITE and SLS for sd() because we want to know which plants have constant employment and sales values.
+## We are concerned that D&B's algorithm that estimates employment and sales values might be less accurate for smaller, inactive plants, reflected in constant values over time.
+duns[, `:=` (
+  minYear                = YEAR[which.min(YEAR)],
+  maxYear                = YEAR[which.max(YEAR)],
+  firstNAICS3            = first(NAICS3),
+  firstNAICS4            = first(NAICS4),
+  firstNAICS5            = first(NAICS5),
+  mean_employment        = mean(EMPLOYEESTHISSITE, na.rm=TRUE),
+  sd_EMPLOYEESTHISSITE   = sd(EMPLOYEESTHISSITE, na.rm = TRUE),
+  mean_logemp            = mean(logEmp_linear, na.rm=TRUE),
+  mean_empgrowth         = mean(employment_growth, na.rm=TRUE),
+  mean_sales             = mean(realSLS2024_linear, na.rm=TRUE),
+  sd_SLS                 = sd(SLS, na.rm = TRUE),
+  firstEMPLOYEESTHISSITE = EMPLOYEESTHISSITE_linear[which.min(YEAR)],
+  firstEMPLOYEESALLSITES = EMPLOYEESALLSITES_linear[which.min(YEAR)],
+  firstLogEmp            = logEmp_linear[which.min(YEAR)],
+  firstLogEmpAll         = logEmpAll_linear[which.min(YEAR)]
+), 
+by = DUNSNO]
+
+##  Employment groups
+duns[, `:=` (emp_group = fcase(firstEMPLOYEESTHISSITE < 5, 1,
+                               firstEMPLOYEESTHISSITE %between% c(5, 50), 2,
+                               firstEMPLOYEESTHISSITE > 50, 3,
+                               default = NA),
+             log_emp_group = fcase(firstLogEmp < 3, 1,
+                                   firstLogEmp %between% c(3, 4), 2,
+                                   firstLogEmp %between% c(4, 5), 3,
+                                   firstLogEmp > 5, 4,
+                                   default = NA))]
+
+# Standardizing headquarters
+## There are inconsistencies for headquarter assignment, where a headquarter is assigned to some years but not the other years for the same plant.
+## Here, we want to standardize headquarter DUNS, so that each establishment DUNSNO will have the same headquarter DUNS.
+
+## Headquarter DUNS number for each establishment
+HQDUNS <- duns[, .(HQDUNSNO.imp = unique(HQDUNSNO[!is.na(HQDUNSNO)])), by = DUNSNO]
+
+## Impute headquarter DUNSNO
+duns[HQDUNS, on = .(DUNSNO), HQDUNSNO.imp := i.HQDUNSNO.imp]
+
+## If headquarters DUNSNO is still missing, impute value with DUNSNO
+duns[is.na(HQDUNSNO.imp), HQDUNSNO.imp := DUNSNO]
+
+# Number of duns per city
+meanduns <- duns[, .(nduns = .N), keyby = .(HQDUNSNO.imp, CITY, STATE, YEAR)][, .(meanduns = mean(nduns)), keyby = .(HQDUNSNO.imp, CITY, STATE)]
+
+duns[meanduns, on = .(HQDUNSNO.imp, CITY, STATE), meanduns := i.meanduns]
+```
+
+## Commuting zone
+
+```{r cz}
+# Zip code - Commuting Zone crosswalk
+
+# Get county for each city based on the largest population
+## This is performed because a city may be located in multiple counties.
+city_county <- zipcode %>%
+  mutate(CITY = toupper(primary_city)) %>%
+  group_by(CITY, state, county) %>%
+  summarise(irs_estimated_population = sum(irs_estimated_population)) %>%
+  ungroup() %>%
+  arrange(desc(irs_estimated_population)) %>%
+  group_by(CITY, state) %>%
+  summarise(county = first(county),
+            COUNTY = toupper(first(county))) %>%
+  data.table() # 29,784
+
+# Split county and state into two variables
+county_cz[, c("county", "state") := tstrsplit(`County Name`, ", ", fixed = TRUE)]
+
+# Add leading zero to CZ and convert county to uppercase
+county_cz[, `:=` (`LMA/CZ` = str_pad(`LMA/CZ`, 5, pad = 0),
+                  COUNTY   = toupper(county))]
+
+# Change county names
+change_county <- data.table(before = c("ST\\.?"), 
+                            after  = c("SAINT"))
+
+for (i in 1:nrow(change_county)) {
+  county_cz[, COUNTY := str_replace_all(COUNTY, change_county[[1]][i], change_county[[2]][i])]
+  city_county[, COUNTY := str_replace_all(COUNTY, change_county[[1]][i], change_county[[2]][i])]
+}
+
+# Add commuting zones
+city_county[county_cz, on = .(COUNTY, state), `:=` (CZ1990 = `i.LMA/CZ`, FIPS = i.FIPS)]
+
+# Select Autor and Dorn data from year 2007
+autor_data <- as.data.table(autor[autor$yr == 2007, c("czone", "popwkage", "avlnhrw")]) # 722
+
+# Add leading zero to commuting zone
+autor_data[, czone := str_pad(czone, 5, pad = 0)]
+
+# Merge `city_county` and `autor_data`
+autor_data <- merge(city_county, autor_data, by.x = "CZ1990", by.y = "czone") # 29,211
+
+# Add CZ data to `duns.plant.year.imp`
+duns[autor_data, 
+     on = .(CITY = CITY, STATE = state), 
+     `:=` (czone    = i.CZ1990,
+           popwkage = i.popwkage, 
+           avlnhrw  = i.avlnhrw)]
+
+# First avlnhrw
+duns[, first_avlnhrw := avlnhrw[which.min(YEAR)], by = DUNSNO]
+
+# Wage groups
+duns[, wage_group := fcase(first_avlnhrw < 2.903609, 1,
+                           first_avlnhrw %between% c(2.903609, 3.007380), 2,
+                           first_avlnhrw > 3.007380, 3,
+                           default = NA)]
+```
+
+# Panjiva import
+
+```{r panjiva}
+# Add company clean names
+duns[duns_firms, on = .(COMPANYNAME), CLEANNAME := i.CLEANNAME]
+
+# Plant-year level
+## Real import value
+panjiva.shipment.year.duns[annualPPI, 
+                           on = .(ArrivalYear = Year), 
+                           `:=` (ppi            = i.real_value_2024,
+                                 value_usd_real = i.real_value_2024*value_usd)]
+
+## By DUNS number
+duns[panjiva.shipment.year.duns, 
+     on = .(DUNSNO = DUNSNO, CITY = CITY, STATE = State, YEAR = ArrivalYear), 
+     `:=` (
+       matchmethod_panjiva.shipment.year = "DUNS number",
+       nshipments                        = i.nshipments, 
+       volume_teu                        = i.volume_teu,
+       weight_kg                         = i.weight_kg,
+       weight_ton                        = i.weight_ton,
+       value_usd                         = i.value_usd,
+       value_usd_real                    = i.value_usd_real,
+       ncontainers                       = i.ncontainers,
+       robot.year                        = i.robot, 
+       robot_parts.year                  = i.robot_parts, 
+       robot_functions.year              = i.robot_functions
+     )]
+
+# Plant level
+## By DUNS number
+duns[panjiva.shipment.duns, 
+     on = .(DUNSNO = DUNSNO), 
+     `:=` (
+       matchmethod_panjiva.shipment = "DUNS number",
+       importer            = 1,
+       FirstShipment       = i.FirstShipment,
+       LastShipment        = i.LastShipment,
+       total_shipments     = i.total_shipments,
+       total_volume_teu    = i.total_volume_teu,
+       total_weight_kg     = i.total_weight_kg,
+       total_weight_ton    = i.total_weight_ton,
+       total_value_usd     = i.total_value_usd,
+       total_containers    = i.total_containers,
+       nyears_shipments    = i.nyears_shipments,
+       shipment_years      = i.shipment_years,
+       firstyear_shipments = i.firstyear_shipments,
+       robot               = i.robot,
+       robot_parts         = i.robot_parts
+     )]
+
+# Total shipment real value
+duns[panjiva.shipment.year.duns[, .(total_value_usd_real = sum(value_usd_real)), by = DUNSNO],
+     on = .(DUNSNO),
+     `:=` (total_value_usd_real = i.total_value_usd_real)]
+
+# Fill in missing values with zero
+cols <- c("importer", "FirstShipment", "LastShipment", "total_shipments", "total_volume_teu", 
+          "total_weight_kg", "total_weight_ton", "total_value_usd", "total_value_usd_real", "total_containers", 
+          "nyears_shipments", "shipment_years", "firstyear_shipments", "robot", "robot_parts")
+duns[, (cols) := lapply(.SD, function(x) ifelse(is.na(x), 0, x)), .SDcols = cols]
+
+# Robot value in t-0
+duns[nyears_shipments == 1, 
+     `:=` (total_volume_teu.t0    = total_volume_teu[YEAR == FirstShipment],
+           total_weight_kg.t0     = total_weight_kg[YEAR == FirstShipment],
+           total_containers.t0    = total_containers[YEAR == FirstShipment],
+           value_usd_real.t0      = value_usd_real[YEAR == FirstShipment],
+           weight_to_emp.t0       = total_weight_kg[YEAR == FirstShipment]/EMPLOYEESTHISSITE_linear[YEAR == FirstShipment],
+           value_to_sales.t0      = value_usd_real[YEAR == FirstShipment]/realSLS2024_linear[YEAR == FirstShipment],
+           robot_value_pcp.t0     = value_usd_real[YEAR == FirstShipment]/EMPLOYEESTHISSITE_linear[YEAR == FirstShipment]), 
+     by = DUNSNO]
+
+# Analytical sample
+importers <- duns[
+  FirstShipment > minYear 
+  & FirstShipment <= maxYear 
+  & matchmethod_panjiva.shipment == "DUNS number"
+  & FirstShipment <= 2020
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 590 / 640
+
+# Cutoffs
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$total_volume_teu.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+# 33.33333%       50% 66.66667% 
+#      0.44      1.00      2.00  
+
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$total_weight_kg.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+# 33.33333%       50% 66.66667% 
+#  1771.667  3680.000  8548.000  
+
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$total_containers.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+# 33.33333%       50% 66.66667% 
+#         1         1         1  
+
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$value_usd_real.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+# 33.33333%       50% 66.66667% 
+#  86293.84 198280.77 393248.83 
+
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$weight_to_emp.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+# 33.33333%       50% 66.66667% 
+#  13.11933  39.71000 113.64368   
+
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$value_to_sales.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+#   33.33333%         50%   66.66667% 
+# 0.001508199 0.004066667 0.011603643 
+
+quantile(duns[YEAR == FirstShipment & DUNSNO %in% importers]$robot_value_pcp.t0, probs = c(1/3, .5, 2/3), na.rm = TRUE)
+# 33.33333%       50% 66.66667% 
+#  858.3589 2075.4670 5530.5879 
+
+# Splitting variables
+duns[, `:=` (weight_kg_grp       = fcase(total_weight_kg.t0 < 1771.667, 0,
+                                         total_weight_kg.t0 %between% c(1771.667, 8548), 1,
+                                         total_weight_kg.t0 >= 8548, 2,
+                                         default = NA),
+             robot_value_grp     = fcase(value_usd_real.t0 < 198280.77, 0,
+                                         value_usd_real.t0 >= 198280.77, 1,
+                                         default = NA),
+             weight_to_emp_grp   = fcase(weight_to_emp.t0 < 39.71, 0,
+                                         weight_to_emp.t0 >= 39.71, 1,
+                                         default = NA),
+             value_to_sales_grp  = fcase(value_to_sales.t0 < 0.004066667, 0,
+                                         value_to_sales.t0 >= 0.004066667, 1,
+                                         default = NA),
+             robot_value_pcp_grp = fcase(robot_value_pcp.t0 < 2075.4670, 0,
+                                         robot_value_pcp.t0 >= 2075.4670, 1,
+                                         default = NA))]
+
+# Show results
+duns[nyears_shipments == 1 & DUNSNO %in% importers, .(nplants = uniqueN(DUNSNO)), by = weight_kg_grp]
+duns[nyears_shipments == 1 & DUNSNO %in% importers, .(nplants = uniqueN(DUNSNO)), by = robot_value_grp]
+duns[nyears_shipments == 1 & DUNSNO %in% importers, .(nplants = uniqueN(DUNSNO)), by = weight_to_emp_grp]
+duns[nyears_shipments == 1 & DUNSNO %in% importers, .(nplants = uniqueN(DUNSNO)), by = value_to_sales_grp]
+duns[nyears_shipments == 1 & DUNSNO %in% importers, .(nplants = uniqueN(DUNSNO)), by = robot_value_pcp_grp]
+```
+
+# BGT adoption
+
+```{r bgt}
+# Add company names from D&B
+bgt.plant[bgt.names, 
+          on = .(EMPLOYER), 
+          `:=` (COMPANYNAME.duns = i.COMPANYNAME.duns)]
+
+# Add DUNSNO from D&B
+bgt.plant[duns.plant[meanduns == 1], 
+          on = .(COMPANYNAME.duns = COMPANYNAME, CITY = CITY, state = STATE), 
+          `:=` (inDUNS = 1,
+                DUNSNO = as.integer(i.DUNSNOs))] # integer is used to remove multiple DUNSNOs in a cell, which are separated by a semicolon. This will be treated differently below.
+
+# Intensity in t0
+## All robotic postings
+bgt.plant[bgt.plant.year.imp[Year == adopt.year.all], 
+          on = .(plantid), 
+          `:=` (nrobotic.t0 = i.nrobotic, 
+                All.t0.all = i.All)]
+
+## Production robotic postings
+bgt.plant[bgt.plant.year.imp[Year == adopt.year.prod], 
+          on = .(plantid), 
+          `:=` (nrobotic_production.t0 = i.nrobotic_production, 
+                All.t0.prod = i.All)]
+
+## Support robotic postings
+bgt.plant[bgt.plant.year.imp[Year == adopt.year.support], 
+          on = .(plantid), 
+          `:=` (nrobotic_support.t0 = i.nrobotic_support, 
+                All.t0.support = i.All)]
+
+## Aggregate to DUNSNO
+bgt.dunsno <- bgt.plant[
+  inDUNS==1 & !is.na(DUNSNO), 
+  .(EMPLOYER               = paste0(unique(EMPLOYER), collapse = "; "),
+    plantid                = paste0(unique(plantid), collapse = "; "),
+    nplantids              = length(unique(plantid)),
+    geos                   = paste(sort(unique(unlist(strsplit(geos[!is.na(geos)], ";\\s*")))), collapse = "; "),
+    adopt.year.all         = if (all(is.na(adopt.year.all))) as.integer(0) else min(adopt.year.all[adopt.year.all > 0], na.rm = TRUE),
+    adopt.year.prod        = if (all(is.na(adopt.year.prod))) as.integer(0) else min(adopt.year.prod[adopt.year.prod > 0], na.rm = TRUE),
+    adopt.year.support     = if (all(is.na(adopt.year.support))) as.integer(0) else min(adopt.year.support[adopt.year.support > 0], na.rm = TRUE),
+    nrobotic               = sum(nrobotic, na.rm = TRUE),
+    nrobotic_production    = sum(nrobotic_production, na.rm = TRUE),
+    nrobotic_support       = sum(nrobotic_support, na.rm = TRUE),
+    All                    = sum(All, na.rm = TRUE),
+    Production             = sum(Production, na.rm = TRUE),
+    Support                = sum(Support, na.rm = TRUE),
+    nrobotic.t0            = sum(nrobotic.t0, na.rm = TRUE),
+    nrobotic_production.t0 = sum(nrobotic_production.t0, na.rm = TRUE),
+    nrobotic_support.t0    = sum(nrobotic_support.t0, na.rm = TRUE),
+    All.t0.all             = sum(All.t0.all, na.rm = TRUE),
+    All.t0.prod            = sum(All.t0.prod, na.rm = TRUE),
+    All.t0.support         = sum(All.t0.support, na.rm = TRUE),
+    minYear                = minYear[which.min(minYear)],
+    maxYear                = maxYear[which.max(maxYear)]),
+  keyby = DUNSNO] # 51,485
+
+bgt.dunsno[, `:=` (intensity.all        = nrobotic/All,
+                   intensity.prod       = nrobotic_production/All,
+                   intensity.support    = nrobotic_support/All,
+                   intensity.t0.all     = nrobotic.t0/All.t0.all,
+                   intensity.t0.prod    = nrobotic_production.t0/All.t0.prod,
+                   intensity.t0.support = nrobotic_support.t0/All.t0.support)] 
+
+# Merge BGT and D&B
+duns[bgt.dunsno, 
+     on = .(DUNSNO = DUNSNO),
+     `:=` (matchmethod_BGT           = "DUNSNO",
+           inBGT                     = 1,
+           EMPLOYER.BGT              = i.EMPLOYER,
+           plantid.BGT               = i.plantid,
+           nplantids.BGT             = i.nplantids,
+           geos.BGT                  = i.geos, 
+           adopt.year.all.BGT        = i.adopt.year.all,
+           adopt.year.prod.BGT       = i.adopt.year.prod,
+           adopt.year.support.BGT    = i.adopt.year.support,
+           intensity.all.BGT         = i.intensity.all,
+           intensity.prod.BGT        = i.intensity.prod,
+           intensity.support.BGT     = i.intensity.support,
+           intensity.t0.all.BGT      = i.intensity.t0.all,
+           intensity.t0.prod.BGT     = i.intensity.t0.prod,
+           intensity.t0.support.BGT  = i.intensity.t0.support,
+           minYear.BGT               = i.minYear,
+           maxYear.BGT               = i.maxYear)]
+
+# There are 4,627 DUNSNOs deleted because they are combined into one cell. These are plants that change DUNSNO over time, typically because they change location or name.
+# We treat these plants differently.
+
+## Aggregate to COMPANYNAME.duns, CITY, state
+bgt.companyname <- bgt.plant[
+  inDUNS==1 & is.na(DUNSNO), 
+  .(EMPLOYER               = paste0(unique(EMPLOYER), collapse = "; "),
+    plantid                = paste0(unique(plantid), collapse = "; "),
+    nplantids              = length(unique(plantid)),
+    geos                   = paste(sort(unique(unlist(strsplit(geos[!is.na(geos)], ";\\s*")))), collapse = "; "),
+    adopt.year.all         = if (all(is.na(adopt.year.all))) as.integer(0) else min(adopt.year.all[adopt.year.all > 0], na.rm = TRUE),
+    adopt.year.prod        = if (all(is.na(adopt.year.prod))) as.integer(0) else min(adopt.year.prod[adopt.year.prod > 0], na.rm = TRUE),
+    adopt.year.support     = if (all(is.na(adopt.year.support))) as.integer(0) else min(adopt.year.support[adopt.year.support > 0], na.rm = TRUE),
+    nrobotic               = sum(nrobotic, na.rm = TRUE),
+    nrobotic_production    = sum(nrobotic_production, na.rm = TRUE),
+    nrobotic_support       = sum(nrobotic_support, na.rm = TRUE),
+    All                    = sum(All, na.rm = TRUE),
+    Production             = sum(Production, na.rm = TRUE),
+    Support                = sum(Support, na.rm = TRUE),
+    nrobotic.t0            = sum(nrobotic.t0, na.rm = TRUE),
+    nrobotic_production.t0 = sum(nrobotic_production.t0, na.rm = TRUE),
+    nrobotic_support.t0    = sum(nrobotic_support.t0, na.rm = TRUE),
+    All.t0.all             = sum(All.t0.all, na.rm = TRUE),
+    All.t0.prod            = sum(All.t0.prod, na.rm = TRUE),
+    All.t0.support         = sum(All.t0.support, na.rm = TRUE),
+    minYear                = minYear[which.min(minYear)],
+    maxYear                = maxYear[which.max(maxYear)]),
+  keyby = .(COMPANYNAME.duns, CITY, state)] # 2,268
+
+bgt.companyname[, `:=` (intensity.all        = nrobotic/All,
+                        intensity.prod       = nrobotic_production/All,
+                        intensity.support    = nrobotic_support/All,
+                        intensity.t0.all     = nrobotic.t0/All.t0.all,
+                        intensity.t0.prod    = nrobotic_production.t0/All.t0.prod,
+                        intensity.t0.support = nrobotic_support.t0/All.t0.support)] 
+
+# Find DUNSNO for each COMPANYNAME, CITY, STATE
+bgt.companyname <- duns %>%
+  select(DUNSNO, COMPANYNAME, CITY, STATE) %>%
+  inner_join(bgt.companyname, by = c("COMPANYNAME" = "COMPANYNAME.duns", "CITY" = "CITY", "STATE" = "state"))
+
+# Add variables
+duns[bgt.companyname, 
+     on = .(DUNSNO), 
+     `:=` (inBGT           = 1, 
+           matchmethod_BGT = ifelse(is.na(matchmethod_BGT), "COMPANYNAME-CITY-STATE", matchmethod_BGT))]
+
+cols <- c("EMPLOYER", "plantid", "nplantids", "geos", "adopt.year.all", "adopt.year.prod", 
+          "adopt.year.support", "intensity.all", "intensity.prod", "intensity.support",
+          #"nrobotic.t0", "nrobotic_production.t0", "nrobotic_support.t0", "All.t0.all", "All.t0.prod", "All.t0.support",
+          "intensity.t0.all", "intensity.t0.prod", "intensity.t0.support", "minYear", "maxYear")
+
+duns[bgt.companyname, 
+     on = .(DUNSNO), 
+     paste0(cols, ".BGT") := lapply(.SD, function(x) {ifelse(is.na(matchmethod_BGT), mget(paste0("i.", x)), x)}),
+     .SDcols = paste0(cols, ".BGT")]
+
+# Add adopter identifier
+duns[, `:=` (adopter.all     = ifelse(adopt.year.all.BGT > 0, 1, 0),
+             adopter.prod    = ifelse(adopt.year.prod.BGT > 0, 1, 0),
+             adopter.support = ifelse(adopt.year.support.BGT > 0, 1, 0))]
+
+# Fill in missing values with zero
+cols <- c("inBGT", "nplantids.BGT", "geos.BGT", 
+          "adopt.year.all.BGT", "adopt.year.prod.BGT", "adopt.year.support.BGT", 
+          #"nrobotic.t0.BGT", "nrobotic_production.t0.BGT", "nrobotic_support.t0.BGT",
+          #"All.t0.all.BGT", "All.t0.prod.BGT", "All.t0.support.BGT",
+          "intensity.all.BGT", "intensity.prod.BGT", "intensity.support.BGT",
+          "intensity.t0.all.BGT", "intensity.t0.prod.BGT", "intensity.t0.support.BGT", 
+          "minYear.BGT", "maxYear.BGT")
+duns[, (cols) := lapply(.SD, function(x) ifelse(is.na(x), 0, x)), .SDcols = cols]
+
+# Analytical sample
+adopters <- duns[
+  adopt.year.prod.BGT > minYear 
+  & adopt.year.prod.BGT <= maxYear 
+  & matchmethod_BGT == "DUNSNO"
+  & adopt.year.prod.BGT <= 2020
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 596 / 788 / 808
+
+# Cutoff
+quantile(duns[YEAR == adopt.year.prod.BGT & DUNSNO %in% adopters, by = DUNSNO]$intensity.t0.prod.BGT, probs = c(1/3, .5, 2/3))
+# 33.33333%       50% 66.66667% 
+# 0.1666667 0.2857143 0.5000000 
+
+# Adoption intensity group
+duns[, `:=` (posting_intensity_group = fcase(intensity.t0.prod.BGT < 0.1666667, 0,
+                                             intensity.t0.prod.BGT %between% c(0.1666667, 0.5), 1,
+                                             intensity.t0.prod.BGT >= 0.5, 2,
+                                             default = NA))]
+
+# Check result
+duns[YEAR == adopt.year.prod.BGT & DUNSNO %in% adopters, .(nplants = uniqueN(DUNSNO)), by = posting_intensity_group]
+duns[adopt.year.prod.BGT > 0, .(nadopt_years = length(unique(adopt.year.prod.BGT))), by = DUNSNO][order(-nadopt_years)] # must not include nadopt_years >= 2
+
+# Save result
+saveRDS(duns, paste0(loadpath, "duns.imp.rds"))
+```
+
+End of script

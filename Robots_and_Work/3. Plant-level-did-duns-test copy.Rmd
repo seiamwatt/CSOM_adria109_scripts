@@ -1,0 +1,1037 @@
+---
+title: "Dun and Bradstreet plant-level difference-in-differences analysis"
+#output: html_notebook
+---
+
+This file contains the script to run Dun and Bradstreet plant-level difference-in-differences analysis.
+
+```{r include=FALSE}
+# Custom functions
+source("custom_functions/did_loop.R")
+source("custom_functions/match_sample.R")
+source("custom_functions/descriptive.R")
+```
+
+# Load required file
+
+```{r}
+# Latest version
+loadpath <- "../data/created-here/latest/"
+
+duns <- readRDS(paste0(loadpath, "duns.imp_20250811.rds"))
+robot_integrators <- fread("../data/ChatGPT verified/treated_firms_labeled_v3.csv")
+```
+
+# Common variables
+
+```{r}
+# Dependent variables
+dv <- c(
+  "logEmp_linear"
+  , "logSales"
+)
+
+# Common path to save files
+commonpath <- paste0("../tables/", format(Sys.Date(), "%Y-%m-%d"), "/")
+```
+
+# Importers and adopters datasets
+
+```{r}
+# Importers
+duns.import   <- duns[FirstShipment > minYear 
+                      & FirstShipment <= maxYear 
+                      & matchmethod_panjiva.shipment == "DUNS number"
+                      & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)] # 15,601
+
+# Adopters
+duns.adoption <- duns[adopt.year.prod.BGT > minYear 
+                      & adopt.year.prod.BGT <= maxYear 
+                      #& matchmethod_BGT == "DUNSNO"
+                      & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO) 
+                      & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)] # 17,018 / 18,930 / 18,993
+```
+
+# Grouping variables
+
+```{r eval=FALSE}
+# Intensity group
+quantile(duns.adoption[, .(intensity.t0.prod.BGT = unique(intensity.t0.prod.BGT)), keyby = DUNSNO]$intensity.t0.prod.BGT, probs = c(1/3, 2/3))
+
+# 33.33333% 66.66667% 
+# 0.1538462 0.5000000 
+
+duns.adoption[, intensity_group := fcase(intensity.t0.prod.BGT < 0.1538462, 1,
+                                         intensity.t0.prod.BGT %between% c(0.1538462, 0.5), 2,
+                                         intensity.t0.prod.BGT > 0.5, 3,
+                                         default = NA)]
+
+duns[, intensity_group := fcase(intensity.t0.prod.BGT < 0.1538462, 1,
+                                         intensity.t0.prod.BGT %between% c(0.1538462, 0.5), 2,
+                                         intensity.t0.prod.BGT > 0.5, 3,
+                                         default = NA)]
+```
+
+
+# Choose sampling method
+## 1. Matched sampling by cohort and grouping variables
+
+```{r eval=FALSE}
+# List of potential control units' DUNSNOs
+ctlids <- unique(duns[!HQDUNSNO.imp %in% unique(duns[adopter==1 | importer==1]$HQDUNSNO.imp)]$DUNSNO) # 2,439,566
+
+n <- 50000
+
+# For importers
+ctl_list_importer <- match_sample(
+  duns[FirstShipment < 2025 
+       #& log_emp_group != 1
+       & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+       & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+       & !DUNSNO %in% unique(duns[is.na(NAICS5)]$DUNSNO)],
+  gname    = "FirstShipment",
+  idname   = "DUNSNO",
+  tname    = "YEAR",
+  ctlids   = ctlids,
+  groupvar = c("log_emp_group", "wage_group", "firstNAICS3"),
+  n        = n,
+  seed     = 1234
+)
+
+ctl_import <- unique(unlist(ctl_list_importer))
+
+# For adopters
+ctl_list_adopter <- match_sample(
+  duns[!DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+       #& log_emp_group != 1
+       & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+       & !DUNSNO %in% unique(duns[is.na(NAICS5)]$DUNSNO)],
+  gname    = "adopt.year.BGT",
+  idname   = "DUNSNO",
+  tname    = "YEAR",
+  ctlids   = ctlids,
+  groupvar = c("log_emp_group", "wage_group", "firstNAICS3"),
+  n        = n,
+  seed     = 1234
+)
+
+ctl_adopt <- unique(unlist(ctl_list_adopter))
+
+# Show result
+lengths(ctl_list_importer)
+# 2007 2008 2009 2010 2011 2012 2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 
+# 2459 2857 2207 2507 2507 2908 3061 2659 3258 3057 2908 2757 3561 3010 2206 2356 2859 2808 
+lengths(ctl_list_adopter)
+# 2010 2011 2012 2013 2014 2015 2016 2017 2018 2019 2020 2021 2022 
+# 2350 2904 2021 2289 2597 3752 3115 3011 4290 5091 4308 6639 7686 
+sum(length(ctl_import)) # 41524
+sum(length(ctl_adopt)) # 45074
+```
+
+## 2. Stratified random sampling
+
+```{r}
+# Treated group
+importers <- duns[
+  FirstShipment > minYear 
+  & FirstShipment <= maxYear 
+  & matchmethod_panjiva.shipment == "DUNS number"
+  & FirstShipment <= 2020
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 590 / 640
+
+adopters <- duns[
+  adopt.year.prod.BGT > minYear 
+  & adopt.year.prod.BGT <= maxYear 
+  & matchmethod_BGT == "DUNSNO"
+  & adopt.year.prod.BGT <= 2020
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 596 / 788 / 808
+
+# List of potential control units' DUNSNOs
+ctlids <- duns[
+  !HQDUNSNO.imp %in% unique(duns[FirstShipment > 0 | adopt.year.all.BGT > 0]$HQDUNSNO.imp)
+  #& mean_employment > 30
+  #& mean_sales > 1e6
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 1,778,986 / 1,778,620 / 1,778,615 / 1,795,430
+
+n <- 50000
+
+# For importers
+ctl_import <- simple_match(
+  duns[DUNSNO %in% c(importers, ctlids)],
+  gname    = "FirstShipment",
+  idname   = "DUNSNO",
+  tname    = "YEAR",
+  ctlids   = ctlids,
+  groupvar = c("log_emp_group", "wage_group", "firstNAICS3"),
+  n        = n,
+  seed     = 1234
+)
+
+# For adopters
+ctl_adopt <- simple_match(
+  duns[DUNSNO %in% c(adopters, ctlids)],
+  gname    = "adopt.year.prod.BGT",
+  idname   = "DUNSNO",
+  tname    = "YEAR",
+  ctlids   = ctlids,
+  groupvar = c("log_emp_group", "wage_group", "firstNAICS3"),
+  n        = n,
+  seed     = 1234
+)
+
+sample_duns <- unique(c(ctl_import, ctl_adopt))
+
+length(ctl_import) # 41,534
+length(ctl_adopt) # 48,083
+length(sample_duns) # 72,221
+```
+
+## 3. Simple random sampling
+
+```{r eval=FALSE}
+# Treated group
+importers <- duns[
+  FirstShipment > minYear 
+  & FirstShipment <= maxYear 
+  & matchmethod_panjiva.shipment == "DUNS number"
+  & FirstShipment <= 2020
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 590 / 640
+
+adopters <- duns[
+  adopt.year.prod.BGT > minYear 
+  & adopt.year.prod.BGT <= maxYear 
+  #& matchmethod_BGT == "DUNSNO"
+  & adopt.year.prod.BGT <= 2020
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 596 / 788
+
+# List of potential control units' DUNSNOs
+ctlids <- duns[
+  !HQDUNSNO.imp %in% unique(duns[FirstShipment > 0 | adopt.year.all.BGT > 0]$HQDUNSNO.imp)
+  #& mean_employment > 30
+  #& mean_sales > 1e6
+  & !DUNSNO %in% unique(duns[is.na(logSales)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(logEmp_linear)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(avlnhrw)]$DUNSNO)
+  & !DUNSNO %in% unique(duns[is.na(firstEMPLOYEESTHISSITE)]$DUNSNO) 
+  & !DUNSNO %in% unique(duns[is.na(NAICS3)]$DUNSNO), 
+  unique(DUNSNO)] # 1,778,986 / 1,778,620 / 1,782,648
+
+set.seed(1234)
+n <- 50000
+sample_duns <- sample(ctlids, size = n)
+```
+
+# Descriptive statistics
+
+```{r}
+var.means <- c("EMPLOYEESTHISSITE_linear", "logEmp_linear", "realSLS2024_linear", "logSales", "firstEMPLOYEESTHISSITE", 
+               "employment_growth", "sales_growth", "YEARSTARTED", "nyears", "minYear", "maxYear")
+
+# Additional variables
+duns[, `:=` (nyears = maxYear - minYear + 1)]
+
+# Single-shipment importers in Dun and Bradstreet
+import_stats <- desc_stat(
+  duns[DUNSNO %in% c(importers, sample_duns) & (nyears_shipments == 1 | FirstShipment == 0)], 
+  var.mean = var.means,
+  var.sum  = NULL,
+  var.freq = c("DUNSNO", "HQDUNSNO.imp"),
+  with.t   = TRUE,
+  idname   = "DUNSNO",
+  tname    = "YEAR",
+  gname    = "FirstShipment",
+  na.rm    = TRUE, 
+  digits   = 2,
+  footnote = NULL)
+
+# Adopters in Dun and Bradstreet
+adopt_stats <- desc_stat(
+  duns[DUNSNO %in% c(adopters, sample_duns)], 
+  var.mean = var.means,
+  var.sum  = NULL,
+  var.freq = c("DUNSNO", "HQDUNSNO.imp"),
+  with.t   = TRUE,
+  idname   = "DUNSNO",
+  tname    = "YEAR",
+  gname    = "adopt.year.prod.BGT",
+  na.rm    = TRUE, 
+  digits   = 2,
+  footnote = NULL)
+
+# Show results
+import_stats$table
+adopt_stats$table
+```
+
+# List of treated firms
+
+The following firms will be feed into OpenAI API for verification on whether they are robot integrators.
+
+```{r eval=FALSE}
+# Importers
+importer_firms <- duns[FirstShipment > 0, unique(COMPANYNAME)]
+
+# Adopters
+adopter_firms  <- duns[adopt.year.prod.BGT > 0, unique(COMPANYNAME)]
+
+# Unique treated firm names
+treated_firms  <- data.table(COMPANYNAME = sort(unique(c(importer_firms, adopter_firms)))) # 4,891
+
+# Importer and adopter identifier
+treated_firms[COMPANYNAME %in% duns[FirstShipment > 0, unique(COMPANYNAME)], importer := 1]
+treated_firms[COMPANYNAME %in% duns[adopt.year.prod.BGT > 0, unique(COMPANYNAME)], adopter := 1]
+
+# Sample members
+treated_firms[COMPANYNAME %in% duns[(DUNSNO %in% importers & nyears_shipments == 1) | DUNSNO %in% adopters, unique(COMPANYNAME)], main_analysis := 1]
+treated_firms[COMPANYNAME %in% duns[(DUNSNO %in% importers & nyears_shipments == 1 & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0) | (DUNSNO %in% adopters & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0), unique(COMPANYNAME)], non_constant_sd := 1]
+
+treated_firms[COMPANYNAME %in% duns[DUNSNO %in% importers & FirstShipment <= 2020 & nyears_shipments == 1, unique(COMPANYNAME)], shipment_group := 1]
+treated_firms[COMPANYNAME %in% duns[DUNSNO %in% importers & FirstShipment <= 2020 & nyears_shipments %between% c(2, 3), unique(COMPANYNAME)], shipment_group := 2]
+treated_firms[COMPANYNAME %in% duns[DUNSNO %in% importers & FirstShipment <= 2020 & nyears_shipments > 3, unique(COMPANYNAME)], shipment_group := 3]
+
+# Save table
+fwrite(treated_firms, paste0(loadpath, "treated_firms.csv"))
+```
+
+# DiD
+## Main analysis
+
+```{r eval=FALSE}
+subsamples <- list(
+  `Single-shipment importers` = duns[DUNSNO %in% importers & nyears_shipments == 1], # 7,946
+  `Adopters`                  = duns[DUNSNO %in% adopters] # 14,067
+  
+)
+
+dvs <- c("logEmp_linear", "logSales")
+gname <- c("FirstShipment", "adopt.year.prod.BGT")
+
+att.table <- data.table()
+
+set.seed(1234)
+
+for (dv in dvs) {
+  for (subsample in seq_along(subsamples)) {
+    try({
+      attgt <- att_gt(
+        yname                  = dv,
+        gname                  = gname[[subsample]],
+        idname                 = "DUNSNO",
+        tname                  = "YEAR",
+        xformla                = as.formula(paste0("~", paste(c("logEmp_linear", "firstNAICS3", "first_avlnhrw"), collapse = "+"))),
+        control_group          = "notyettreated",
+        base_period            = "universal",
+        allow_unbalanced_panel = "TRUE",
+        est_method             = "ipw",
+        clustervars            = "HQDUNSNO.imp",
+        data                   = subsamples[[subsample]]
+      )
+      
+      # Different aggregations of ATT
+      att.dynamic  <- aggte(attgt, type = "dynamic", na.rm = T, min_e = -8, max_e = 8)
+      
+      att_i <- data.table(
+        subsample = names(subsamples)[subsample],
+        dv        = dv,
+        n         = att.dynamic$DIDparams$n,
+        att       = round(att.dynamic$overall.att, 2),
+        se        = round(att.dynamic$overall.se, 2),
+        p.value   = round(2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))), 3),
+        star      = fcase(2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))) < .01, "***",
+                          2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))) < .05, "**",
+                          2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))) < .1, "*",
+                          default = "")
+      )
+      
+      att.table <- rbind(att.table, att_i)
+      
+      print(ggdid(att.dynamic, title = paste0("Subsample: ", names(subsamples)[subsample], " | DV: ", dv)))
+    })
+  }
+}
+
+att.table[order(subsample)]
+```
+
+```{r eval=FALSE}
+subsamples <- list(
+  `Low intensity`  = duns[DUNSNO %in% importers & weight_to_emp_grp == 0 & nyears_shipments == 1], # 2,508
+  `High intensity` = duns[DUNSNO %in% importers & weight_to_emp_grp == 1 & nyears_shipments == 1] # 2,020
+)
+
+dvs <- c("logEmp_linear", "logSales")
+
+att.table <- data.table()
+
+set.seed(1234)
+
+for (dv in dvs) {
+  for (subsample in seq_along(subsamples)) {
+    try({
+      attgt <- att_gt(
+        yname                  = dv,
+        gname                  = "FirstShipment",
+        idname                 = "DUNSNO",
+        tname                  = "YEAR",
+        xformla                = as.formula(paste0("~", paste(c("logEmp_linear", "firstNAICS3", "first_avlnhrw"), collapse = "+"))),
+        control_group          = "notyettreated",
+        base_period            = "universal",
+        allow_unbalanced_panel = "TRUE",
+        est_method             = "ipw",
+        clustervars            = "HQDUNSNO.imp",
+        data                   = subsamples[[subsample]]
+      )
+      
+      # Different aggregations of ATT
+      att.dynamic  <- aggte(attgt, type = "dynamic", na.rm = T, min_e = -4, max_e = 4)
+      
+      att_i <- data.table(
+        subsample = names(subsamples)[subsample],
+        dv        = dv,
+        n         = att.dynamic$DIDparams$n,
+        att       = round(att.dynamic$overall.att, 2),
+        se        = round(att.dynamic$overall.se, 2),
+        p.value   = round(2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))), 3),
+        star      = fcase(2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))) < .01, "***",
+                          2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))) < .05, "**",
+                          2 * (1 - pnorm(abs(att.dynamic$overall.att/att.dynamic$overall.se))) < .1, "*",
+                          default = "")
+      )
+      
+      att.table <- rbind(att.table, att_i)
+      
+      print(ggdid(att.dynamic, title = paste0("Subsample: ", names(subsamples)[subsample], " | DV: ", dv)))
+    })
+  }
+}
+
+att.table[order(subsample)]
+```
+
+```{r}
+# =============
+# Never adopter
+# =============
+
+# Treated group
+subsample <- list(
+  `Single-shipment importers` = duns[DUNSNO %in% importers & nyears_shipments == 1], # 7,946
+  `Adopters`                  = duns[DUNSNO %in% adopters] # 14,067
+  
+)
+
+# Control group
+## For stratified random sampling
+ctl.group <- list(
+  duns[log_emp_group != 1 & DUNSNO %in% sample_duns], # 412,425
+  duns[log_emp_group != 1 & DUNSNO %in% sample_duns] # 442,285
+)
+
+## For simple random sampling
+#ctl.group <- replicate(2, duns[DUNSNO %in% sample_duns & log_emp_group != 1], simplify = FALSE) # 134,567
+
+# Treatment variables
+adoption <- c("FirstShipment", "adopt.year.prod.BGT")
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "main-analysis-2/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the treatment year) to t+4. A plant is defined as a unique DUNS number. The never-treated group comprises plants from firms whose plants never imported robots or posted robotic jobs, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva (Panel 1) or the first year of robotic job postings in production occupations observed in BGT (Panel 2). The treatment cohorts span the periods 2007–2019 (panel 1) and 2010–2019 (panel 2). Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Panel 1 is restricted to importers with shipments in a single year to exclude wholesalers or robot integrators, who perform multi-year shipments, as well as the compound effect of multiple adoptions from ongoing integration of robotics into production processes. Control variables include the log of employment in the first sample year, 3-digit NAICS codes, and the commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+never_import_main <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Single-shipment importers - logSales - FirstShipment.rds"))
+never_adopt_main  <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Adopters - logSales - adopt.year.prod.BGT.rds"))
+
+# Restrict the treated sample to be equal to the never adopters comparison
+subsample <- list(
+  `Single-shipment importers` = duns %>% inner_join(never_import_main %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 7,223
+  `Adopters`                  = duns %>% inner_join(never_adopt_main %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 1: Excluding robot integrators
+
+Prompt used on ChatGPT-4o-mini:
+
+You are a meticulous classifier. 
+
+The attached file includes a list of firms that either import robots from outside the US or demand domestic workers with robotic skills. Some of them are robot sellers, robot integrators, or robot producers. These firms either buy robots or demand robotic skills because they sell robots or provide automation services to other firms, rather than utilizing them to automate their internal production processes. The firm can be part of another company that provides automation services. Example: PROGRESSIVE TOOL & INDS CO was acquired by Fiat’s Comau and became Comau Pico, an industrial automation integrator.
+
+Task: given ONLY a firm name in the first column, output: label: 1 if the firm is a robot producer OR a robotics/automation systems integrator (i.e., sells robots, cells, or integration services to other firms). label: 0 otherwise (end-users, general manufacturers, staffing, etc.). Look for the relationship with the parent company in your identification. Create a new column titled "robot_integrator" for the output.
+
+```{r}
+# =============
+# Never adopter
+# =============
+non_integrators <- duns[!DUNSNO %in% unique(duns[COMPANYNAME %in% robot_integrators[robot_integrator==1]$COMPANYNAME]$DUNSNO)]
+
+# Treated group
+subsample <- list(
+  `Importers (excl. integrators)` = non_integrators[DUNSNO %in% importers], # 12,317
+  `Adopters (excl. integrators)`  = non_integrators[DUNSNO %in% adopters] # 13,702
+  
+)
+
+# Control group
+# Control group
+ctl.group <- list(
+  non_integrators[log_emp_group != 1 & DUNSNO %in% sample_duns], # 412,401
+  non_integrators[log_emp_group != 1 & DUNSNO %in% sample_duns] # 442,262
+)
+
+#ctl.group <- replicate(2, non_integrators[DUNSNO %in% sample_duns], simplify = FALSE) # 402,258
+
+# Treatment variables
+adoption <- c("FirstShipment", "adopt.year.prod.BGT")
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "integrators-excluded/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. Robot integrators, verified using ChatGPT-4o-mini, are excluded from both the treated and control groups. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva (Panel 1) or the first year of robotic job postings in production occupations observed in BGT (Panel 2). The treatment cohorts span the periods 2007–2019 (panel 1) and 2010–2019 (panel 2). Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Each importer has one shipment year. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+never_import_int <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Importers (excl. integrators) - logSales - FirstShipment.rds"))
+never_adopt_int  <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Adopters (excl. integrators) - logSales - adopt.year.prod.BGT.rds"))
+
+# Restrict the treated sample to be equal to the never adopters comparison
+subsample <- list(
+  `Importers (excl. integrators)` = duns %>% inner_join(never_import_int %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 7,223
+  `Adopters (excl. integrators)`  = duns %>% inner_join(never_adopt_int %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 2: Non-constant employment and sales
+
+The following chunk restrict the sample (both treated and control groups) to those with non-constant employment and sales (i.e., non-zero standard deviations). Dun and Bradstreet collects employment and sales information from various sources, and impute missing data using its own algorithm. We observe many constant values of employment and sales over time for a unique DUNSNO. We are concerned that the algorithm may not give an accurate figure for the actual employment and sales, particularly for small and inactive plants. To alleviate this concern, we test whether the results hold for the sample with non-constant employment and sales values over the sample period.
+
+Another robustness tests that we haven't performed:
+1. Use employment data from OSHA (sales is not available)
+2. Focus on public firms, with the assumption that they are less prone to missing data
+3. Restrict the sample by EMPLOYEETHISSITECODE and SLSCODE (we don't know yet what the values in these variables represent)
+
+```{r}
+# ==============
+# Never adopters
+# ==============
+
+# Treated group
+subsample <- list(
+  `Single-shipment importers, non-constant employment and sales` = duns[DUNSNO %in% importers & nyears_shipments == 1 & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0], # 5,853
+  `Adopters, non-constant employment and sales`                  = duns[DUNSNO %in% adopters & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0] # 11,192
+)
+
+# Control group
+## For stratified random sampling
+ctl.group <- list(
+  duns[log_emp_group != 1 & DUNSNO %in% sample_duns & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0], # 284,288
+  duns[log_emp_group != 1 & DUNSNO %in% sample_duns & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0] # 307,578
+)
+
+## For simple random sampling
+#ctl.group <- replicate(2, duns[DUNSNO %in% sample_duns & sd_EMPLOYEESTHISSITE > 0 & sd_SLS > 0], simplify = FALSE) # 138,800
+
+# Treatment variables
+adoption <- c("FirstShipment", "adopt.year.prod.BGT")
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "non-zero-sd/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. Plants in both treated and control groups have non-constant employment and sales. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva (Panel 1) or the first year of robotic job postings in production occupations observed in BGT (Panel 2). The treatment cohorts span the periods 2007–2019 (panel 1) and 2010–2019 (panel 2). Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Each importer has one shipment year. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+never_import_sd <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Single-shipment importers, non-constant employment and sales - logSales - FirstShipment.rds"))
+never_adopt_sd  <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Adopters, non-constant employment and sales - logSales - adopt.year.prod.BGT.rds"))
+
+# Restrict the sample to be equal to the never adopters comparison
+subsample <- list(
+  `Single-shipment importers, non-constant employment and sales` = duns %>% inner_join(never_import_sd %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `Adopters, non-constant employment and sales`                  = duns %>% inner_join(never_adopt_sd %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 3: by adoption intensity group
+
+The following chunk splits the BGT adopters by adoption intensity, where intensity is measured as the ratio of robotic job postings in production occupations to job postings in all occupations. This exercise is performed to evaluate the hypothesis that as the automated stages expand, substitution effect outweighs reinstatement and productivity effects. Thus, plants in higher intensity quartiles will have smaller ATTs than those in lower quartiles.
+
+```{r}
+# ==============
+# Never adopters
+# ==============
+
+# Treated group
+subsample <- list(
+  `Low shipment weight`        = duns[DUNSNO %in% importers & weight_kg_grp == 0], # 3,987 | Small groups: 2009,2015
+  `High shipment weight`       = duns[DUNSNO %in% importers & weight_kg_grp == 1], # 3,959
+  `Low robotic posting share`  = duns[DUNSNO %in% adopters & posting_intensity_group == 0], # 7,147
+  `High robotic posting share` = duns[DUNSNO %in% adopters & posting_intensity_group == 1] # 7,156
+)
+
+# Control group
+ctl.group <- replicate(4, duns[log_emp_group != 1 & DUNSNO %in% sample_duns], simplify = FALSE) # 442,285
+
+# Treatment variables
+adoption <- c(rep("FirstShipment", 2), rep("adopt.year.prod.BGT", 2))
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "by-intensity/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. Low and high shipment weight groups are split at the median value of 3,680 kg. Low and high robotic posting share is split at the median value of 28.57 percent. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva (panels 1 and 2) or the first year of robotic job postings in production occupations observed in BGT (panels 3 and 4). The treatment cohorts span the periods 2007–2019 (panels 1 and 2) and 2010–2019 (panels 3 and 4). Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+subset_1 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Low shipment weight - logSales - FirstShipment.rds"))
+subset_2 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - High shipment weight - logSales - FirstShipment.rds"))
+subset_3 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Low robotic posting share - logSales - adopt.year.prod.BGT.rds"))
+subset_4 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - High robotic posting share - logSales - adopt.year.prod.BGT.rds"))
+
+# Restrict the sample to be equal to the never adopters comparison
+subsample <- list(
+  `Low shipment weight`        = duns %>% inner_join(subset_1 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `High shipment weight`       = duns %>% inner_join(subset_2 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `Low robotic posting share`  = duns %>% inner_join(subset_3 %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `High robotic posting share` = duns %>% inner_join(subset_4 %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 4: By number of shipment years
+
+```{r}
+# ==============
+# Never adopters
+# ==============
+
+# Treated group
+subsample <- list(
+  `1-shipment importers`         = duns[DUNSNO %in% importers & nyears_shipments == 1], # 7,946
+  `2-to-3-shipment importers`    = duns[DUNSNO %in% importers & nyears_shipments %between% c(2, 3)], # 3,150
+  `1-to-3-shipment importers`    = duns[DUNSNO %in% importers & nyears_shipments %between% c(1, 3)], # 11,096
+  `4-or-more-shipment importers` = duns[DUNSNO %in% importers & nyears_shipments > 3] # 1,430
+)
+
+# Control group
+ctl.group <- replicate(4, duns[log_emp_group != 1 & DUNSNO %in% sample_duns], simplify = FALSE) # 412,425
+
+# Treatment variables
+adoption <- rep("FirstShipment", 4)
+
+# Main path to save results
+path <- paste0(commonpath, "by-shipment-years/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva. The treatment cohorts span the periods 2007–2019. Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+never_import_1 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - 1-shipment importers - logSales - FirstShipment.rds"))
+never_import_2 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - 2-to-3-shipment importers - logSales - FirstShipment.rds"))
+never_import_3 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - 1-to-3-shipment importers - logSales - FirstShipment.rds"))
+never_import_4 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - 4-or-more-shipment importers - logSales - FirstShipment.rds"))
+
+# Restrict the sample to be equal to not-yet adopters
+subsample <- list(
+  `1-shipment importers`         = duns.import %>% inner_join(never_import_1 %>% filter(FirstShipment > 0) %>% select(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `2-to-3-shipment importers`    = duns.import %>% inner_join(never_import_2 %>% filter(FirstShipment > 0) %>% select(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `1-to-3-shipment importers`    = duns.import %>% inner_join(never_import_3 %>% filter(FirstShipment > 0) %>% select(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `4-or-more-shipment importers` = duns.import %>% inner_join(never_import_4 %>% filter(FirstShipment > 0) %>% select(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 5: unrestricted sample
+
+```{r}
+# ==============
+# Never adopters
+# ==============
+
+# Treated group
+subsample <- list(
+  `Importers (unrestricted)` = duns[FirstShipment > 0], # 18,894
+  `Adopters (unrestricted)`  = duns[adopt.year.prod.BGT > 0] # 36,093
+)
+
+# Control group
+ctl.group <- list(
+  duns[log_emp_group != 1 & DUNSNO %in% sample_duns], # 412,425
+  duns[log_emp_group != 1 & DUNSNO %in% sample_duns] # 442,285
+)
+
+#ctl.group <- replicate(2, duns[DUNSNO %in% ctlids], simplify = FALSE) # 14,230,420
+
+# Treatment variables
+adoption <- c("FirstShipment", "adopt.year.prod.BGT")
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "unrestricted-sample/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. The treated group is the unrestricted sample. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period. The adoption year is defined as the first year of import activity recorded in Panjiva (Panel 1) or the first year of robotic job postings in production occupations observed in BGT (Panel 2). The treatment cohorts span the periods 2007–2023 (panel 1) and 2010–2021 (panel 2). Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+never_import_all <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Importers (unrestricted) - logSales - FirstShipment.rds"))
+never_adopt_all <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Adopters (unrestricted) - logSales - adopt.year.prod.BGT.rds"))
+
+# Restrict the sample to be equal to never adopters
+subsample <- list(
+  `Importers (unrestricted)` = duns %>% inner_join(never_import_all %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `Adopters (unrestricted)`  = duns %>% inner_join(never_adopt_all %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 3b: by 3 groups of intensity
+
+```{r}
+# ==============
+# Never adopters
+# ==============
+
+# Treated group
+subsample <- list(
+  `Low shipment weight`          = duns[DUNSNO %in% importers & weight_kg_grp == 0], # 2,663 | Small groups: 2007,2008,2009,2010,2011,2015.
+  `Medium shipment weight`       = duns[DUNSNO %in% importers & weight_kg_grp == 1], # 2,672
+  `High shipment weight`         = duns[DUNSNO %in% importers & weight_kg_grp == 2], # 2,611
+  `Low robotic posting share`    = duns[DUNSNO %in% adopters & posting_intensity_group == 0], # 5,213
+  `Medium robotic posting share` = duns[DUNSNO %in% adopters & posting_intensity_group == 1], # 4,738
+  `High robotic posting share`   = duns[DUNSNO %in% adopters & posting_intensity_group == 2] # 4,352
+)
+
+# Control group
+ctl.group <- replicate(6, duns[log_emp_group != 1 & DUNSNO %in% sample_duns], simplify = FALSE) # 442,285
+
+# Treatment variables
+adoption <- c(rep("FirstShipment", 3), rep("adopt.year.prod.BGT", 3))
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "by-intensity-3-groups/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva (panels 1 and 2) or the first year of robotic job postings in production occupations observed in BGT (panels 3 and 4). The treatment cohorts span the periods 2007–2019 (panels 1 and 2) and 2010–2019 (panels 3 and 4). Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+subset_1 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Low shipment weight - logSales - FirstShipment.rds"))
+subset_2 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Medium shipment weight - logSales - FirstShipment.rds"))
+subset_3 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - High shipment weight - logSales - FirstShipment.rds"))
+subset_4 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Low robotic posting share - logSales - adopt.year.prod.BGT.rds"))
+subset_5 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Medium robotic posting share - logSales - adopt.year.prod.BGT.rds"))
+subset_6 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - High robotic posting share - logSales - adopt.year.prod.BGT.rds"))
+
+# Restrict the sample to be equal to the never adopters comparison
+subsample <- list(
+  `Low shipment weight`          = duns %>% inner_join(subset_1 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `Medium shipment weight`       = duns %>% inner_join(subset_2 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `High shipment weight`         = duns %>% inner_join(subset_3 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `Low robotic posting share`    = duns %>% inner_join(subset_4 %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `Medium robotic posting share` = duns %>% inner_join(subset_5 %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `High robotic posting share`   = duns %>% inner_join(subset_6 %>% filter(adopt.year.prod.BGT > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+## Robustness 3c: by robot value to sales
+
+The following chunk splits the BGT adopters by adoption intensity, where intensity is measured as the share of robot real values to sales real value. This exercise is performed to evaluate the hypothesis that as the automated stages expand, substitution effect outweighs reinstatement and productivity effects. Thus, plants in higher intensity quartiles will have smaller ATTs than those in lower quartiles.
+
+```{r}
+# ==============
+# Never adopters
+# ==============
+
+# Treated group
+subsample <- list(
+  `Low robot value to sales (less than 0.004)` = duns[DUNSNO %in% importers & robot_value_group == 0 & nyears_shipments == 1], # 2,508
+  `High robot value to sales (0.004 or more)`  = duns[DUNSNO %in% importers & robot_value_group == 1 & nyears_shipments == 1] # 2,020
+)
+
+# Control group
+ctl.group <- replicate(2, duns[log_emp_group != 1 & DUNSNO %in% sample_duns], simplify = FALSE) # 627,022
+
+# Treatment variables
+adoption <- rep("FirstShipment", 2)
+
+# Covariates
+xformla  <- c("firstLogEmp", "firstNAICS3", "first_avlnhrw")
+
+# Main path to save results
+path <- paste0(commonpath, "by-robot-value-to-sales/")
+
+# Notes below the table
+notes <- "The ATT is estimated over a five-year window from year t–0 (the adoption year) to t+4. A plant is defined as a unique DUNS number. Adopters are split by the ratio of the real value of robot imports to the real value of sales in t–0. The never-treated group comprises plants from firms with no plants ever imported robots or posted robotic jobs over the sample period, selected using stratified random sampling by size group, wage group, and 3-digit NAICS code. The adoption year is defined as the first year of import activity recorded in Panjiva. The treatment cohorts span the periods 2007–2019. Missing data on employment and sales are imputed via linear interpolation using the nearest two non-missing observations. Control variables include log of employment in the first sample year, 3-digit NAICS codes, and commuting zone's log of wages."
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "nevertreated",
+  ctl.group = ctl.group, # Data frame for the control group. Will be activated if ctl = "nevertreated".
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes,
+)
+
+# ================
+# Not-yet adopters
+# ================
+
+# Load sample used in never-treated DiD
+subset_1 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - Low robot value to sales (less than 0.004) - logSales - FirstShipment.rds"))
+subset_2 <- readRDS(paste0(path, "nevertreated/event-study/data/event - nevertreated - High robot value to sales (0.004 or more) - logSales - FirstShipment.rds"))
+
+# Restrict the sample to be equal to the never adopters comparison
+subsample <- list(
+  `Low robot value to sales (less than 0.004)` = duns %>% inner_join(subset_1 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")), # 
+  `High robot value to sales (0.004 or more)` = duns %>% inner_join(subset_2 %>% filter(FirstShipment > 0) %>% distinct(DUNSNO, YEAR), by = c("DUNSNO", "YEAR")) # 
+)
+
+# Run DiD
+did_loop(
+  dv        = dv,
+  ctl       = "notyettreated",
+  adoption  = adoption, # List of adoption variables,
+  subsample = subsample, # List of subsamples
+  path      = path, # Main folder to save results
+  xformla   = xformla,
+  footnote  = notes
+)
+```
+
+End of script

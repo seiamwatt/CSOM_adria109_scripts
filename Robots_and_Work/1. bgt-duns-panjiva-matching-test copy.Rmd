@@ -1,0 +1,1519 @@
+---
+title: "Firm and plant level data construction"
+#output: html_notebook
+---
+
+This script produces firm and plant-level datasets.
+
+```{r libraries, include=FALSE}
+# R packages to install and load
+packages <- c(
+  "data.table",   # For fast data manipulation
+  "tidygeocoder", # For geocoding plant addresses
+  "haven",        # For reading .dta files
+  "tidyr"         # For data manipulation
+  )
+
+# Install and load packages
+install_and_load <- function(package) {
+  if (!require(package, character.only = TRUE)) {
+    install.packages(package, dependencies = TRUE)
+  }
+  library(package, character.only = TRUE)
+}
+
+# Apply the function
+invisible(lapply(packages, install_and_load))
+
+# Custom functions
+source("custom_functions/match_name.R")    # For matching firm names
+source("custom_functions/parse_address-test.R") # For splitting addresses
+source("custom_functions/impute_data.R")   # For imputing missing data
+
+# Create a new folder to save results
+## Path to save results
+## Change 'format(Sys.Date(), "%Y-%m-%d")' to 'latest' to replace the latest version. (NOT RECOMMENDED)
+
+#saves path -from initial script
+#savepath <- paste0("../data/created-here/", format(Sys.Date(), "%Y-%m-%d"), "/")
+
+#saves path - to dummy test folder (Vector)
+savepath <- paste0("~/GitPage/CarlsonResearch/data/created-here/", 
+                   format(Sys.Date(), "%Y-%m-%d"), "/") 
+
+## Create a new folder if the path does not exist
+if (!file.exists(savepath)) dir.create(savepath, recursive=T)
+```
+
+```{r reading-datasets, include=FALSE}
+
+# Geolocated addresses
+## The file below contains addresses for 39,372 unique latitude-longitudes geocoded using ArcGIS.
+address <- fread("../data/addresses.csv")
+
+# State abbreviation
+## This file contains a list of U.S. States and their abbreviations
+State_abbreviation <- fread("../data/State_abbreviation.csv")
+
+# Zip code
+# Source: https://www.unitedstateszipcodes.org/zip-code-database/
+# Download Personal Free (will need to enter email address)
+zipcode <- data.table(read_excel("../data/zip_code_database.xlsx", sheet = "data"))
+
+# 1990 Commuting Zones
+# Source: https://usa.ipums.org/usa/volii/1990LMAascii.txt
+county_cz <- fread("../data/IPUMS/1990LMAascii.txt")
+
+# Commuting zone-level variables
+## This file contains a commuting zone's population of working age and average hourly wage
+### Source: https://www.openicpsr.org/openicpsr/project/116495/version/V1/view;jsessionid=42CCA589332B47E0BC41BDEB6E54B345?path=/openicpsr/116495/fcr:versions/V1/dta
+### Autor, David H. “Work of the Past, Work of the Future.” AEA Papers and Proceedings 109 (May 2019): 1–32. https://doi.org/10.1257/pandp.20191110.
+autor <- read_dta("../data/workfile5015.dta")
+
+# SIC to NAICS crosswalk
+## Source: https://www.naics.com/sic-naics-crosswalk-search-results
+sic_to_naics <- fread("../data/SIC4_to_NAICS6_naics.com.csv", colClasses = c("integer", "character", "integer", "character"))
+
+# Producer Price Index by Industry: Total Manufacturing Industries (PCUOMFGOMFG)
+## Source: https://fred.stlouisfed.org/series/PCUOMFGOMFG
+mfgPPI <- fread("../data/PCUOMFGOMFG.csv")
+
+## Parse out year and month
+mfgPPI[, `:=` (Year  = year(`observation_date`), 
+               Month = month(`observation_date`))]
+
+## Restrict to data in December
+annualPPI <- mfgPPI[Month==12]
+
+## Calculate index to convert nominal value to 2024 value
+annualPPI[, `:=` (real_value_2024 = annualPPI[Year==2024]$PCUOMFGOMFG/PCUOMFGOMFG)]
+```
+
+```{r reading-DB, include=FALSE}
+# ==================
+# Dun and Bradstreet
+# ==================
+
+## The files below contains 18,411,058 establishment-year data from 2,473,124 establishments in the manufacturing sector from 2003 to 2024.
+## An establishment is defined as a unique DUNS number.
+
+# Define folder path
+path  <- "../data/Duns and Bradstreet/"
+
+# Identify files in the folder
+files <- list.files(path = path)
+
+# Create an empty table to store data
+duns <- data.table()
+
+# Load files
+for (i in files){
+  # Status message
+  cat(paste0("\rProcessing file ", i, "\r"))
+  
+  # Read file and store it on `duns`
+  duns <- rbind(duns, fread(paste0(path, i)))
+}
+```
+
+```{r reading-Panjiva, include=FALSE}
+# =======
+# Panjiva
+# =======
+
+## Source: https://libguides.umn.edu/57553239 (need to create a new account with UMN email address)
+## The files below contains 73,108 export-import shipment records from Panjiva during 2007-2025 with the following HS codes:
+###	8428.70 (Industrial robots)
+### 8479.50 (Industrial robots, not elsewhere specified or included)
+###	8427.10.80.40 (Fork-lift trucks; other works trucks fitted with lifting or handling equipment: Self-propelled trucks powered by an electric motor: Automated guided vehicle (AGV): Aerial work platforms of a kind described in statistical note 3 to this chapter)
+###	8427.10.80.50 (Fork-lift trucks; other works trucks fitted with lifting or handling equipment: Self-propelled trucks powered by an electric motor: Automated guided vehicle (AGV): Other)
+### 8479.90.95 (Machines and mechanical appliances having individual functions, not specified or included elsewhere in this chapter; parts thereof: Parts: Of industrial robots)
+
+# Define folder path
+path <- "../data/Panjiva/shipment/"
+
+# List of files
+files <- c("Panjiva-US_Imports-all-results_1_to_10000_of_73108-2025-04-14-13-47",
+           "Panjiva-US_Imports-all-results_10001_to_20000_of_73108-2025-04-14-13-39",
+           "Panjiva-US_Imports-all-results_20001_to_30000_of_73108-2025-04-14-12-53",
+           "Panjiva-US_Imports-all-results_30001_to_40000_of_73108-2025-04-14-12-46",
+           "Panjiva-US_Imports-all-results_40001_to_50000_of_73108-2025-04-14-12-29",
+           "Panjiva-US_Imports-all-results_50001_to_60000_of_73108-2025-04-14-12-20",
+           "Panjiva-US_Imports-all-results_60001_to_70000_of_73108-2025-04-14-12-11",
+           "Panjiva-US_Imports-all-results_70001_to_73108_of_73108-2025-04-14-11-51")
+
+# Create an empty table to store data
+panjiva_5hs <- data.table()
+
+for (i in files){
+  # Status message
+  cat(paste0("\rProcessing file ", i, "      \r"))
+  
+  # Read file and store it on `panjiva_5hs`
+  panjiva_5hs <- rbind(panjiva_5hs, read_excel(paste0(path, i, ".xlsx"), sheet = "US Imports Shipments"))
+}
+
+# Change variable types to numeric and date
+panjiva_5hs[, `:=` (
+  `Consignee D-U-N-S®` = as.numeric(`Consignee D-U-N-S®`),
+  `Arrival Date`       = as.Date(`Arrival Date`, origin = "1899-12-30")
+)][, ArrivalYear := year(`Arrival Date`)]
+
+
+# Robot parts and functions in Panjiva shipments
+## The file below contains, based on the shipment description, the identification of:
+## (1) whether the container includes full robot or robot part, 
+## (2) robot applications as defined by IFR.
+## DeepSeek AI was used to verify the shipment description.
+
+panjiva_robot_parts <- fread("../data/Panjiva/panjiva-robot-parts.csv") # 71,457
+
+## Merge with panjiva_5hs
+panjiva_5hs[panjiva_robot_parts, 
+            on = .(`Bill of Lading Number`= bill_of_lading), 
+            `:=` (robot           = i.robot, 
+                  robot_parts     = i.robot_parts, 
+                  robot_functions = i.robot_functions)]
+
+## Fill in missing values
+panjiva_5hs[, `:=` (robot       = ifelse(is.na(robot), 0, robot),
+                    robot_parts = ifelse(is.na(robot_parts), 0, robot_parts))]
+
+## Convert address, consignee, and city to uppercase
+panjiva_5hs[, `:=` (CONSIGNEE = toupper(Consignee),
+                    ADDRESS   = toupper(`Consignee Address`),
+                    CITY      = `Consignee City`)]
+
+## Get abbreviated state names
+panjiva_5hs[State_abbreviation, 
+            on = .(`Consignee State/Region` = State), 
+            State := i.Abbreviation]
+```
+
+```{r reading-BGT, eval=FALSE}
+# BGT job postings
+SKILL.csv <- fread("../data/BGT/SKILL.csv", na.strings = "")
+```
+
+```{r files-createdhere, eval=FALSE}
+# Latest version
+loadpath <- "../data/created-here/latest/"
+
+# panjivafirms
+panjiva_firms  <- readRDS(paste0(loadpath, "panjiva_firms", ".rds"))
+panjiva_plants <- readRDS(paste0(loadpath, "panjiva_plants", ".rds")) # 1
+
+# bgtfirms
+bgt_firms  <- readRDS(paste0(loadpath, "bgt_firms", ".rds"))
+bgt_plants <- readRDS(paste0(loadpath, "bgt_plants", ".rds"))
+
+# dunsfirms
+duns_firms  <- readRDS(paste0(loadpath, "duns_firms", ".rds"))
+duns_plants <- readRDS(paste0(loadpath, "duns_plants", ".rds"))
+
+# dunsnumbers
+duns.number            <- readRDS(paste0(loadpath, "duns.number", ".rds"))
+missing.address.arcgis <- readRDS(paste0(loadpath, "missing.address.arcgis", ".rds"))
+panjiva_plants         <- readRDS(paste0(loadpath, "panjiva_plants", ".rds")) # 2
+
+# bgtplants
+bgt.plant.naics.year <- readRDS(paste0(loadpath, "bgt.plant.naics.year", ".rds")) # 1
+bgt.plant.year       <- readRDS(paste0(loadpath, "bgt.plant.year", ".rds"))
+bgt.plant            <- readRDS(paste0(loadpath, "bgt.plant", ".rds"))
+bgt.naics            <- readRDS(paste0(loadpath, "bgt.naics", ".rds"))
+bgt.plant.year.imp   <- readRDS(paste0(loadpath, "bgt.plant.year.imp", ".rds")) # 1
+
+# dunsplants
+duns.plant.naics.year <- readRDS(paste0(loadpath, "duns.plant.naics.year", ".rds"))
+duns.plant.year       <- readRDS(paste0(loadpath, "duns.plant.year", ".rds"))
+duns.naics            <- readRDS(paste0(loadpath, "duns.naics", ".rds"))
+duns.plant            <- readRDS(paste0(loadpath, "duns.plant", ".rds"))
+duns                  <- readRDS(paste0(loadpath, "duns", ".rds")) # 1
+
+# nplants
+nplants <- readRDS(paste0(loadpath, "nplants", ".rds"))
+duns    <- readRDS(paste0(loadpath, "duns", ".rds")) # 2
+
+# panjivamerge
+panjiva.shipment.year.duns      <- readRDS(paste0(loadpath, "panjiva.shipment.year.duns", ".rds"))
+panjiva.shipment.year.origname  <- readRDS(paste0(loadpath, "panjiva.shipment.year.origname", ".rds"))
+panjiva.shipment.year.cleanname <- readRDS(paste0(loadpath, "panjiva.shipment.year.cleanname", ".rds"))
+panjiva.shipment.duns           <- readRDS(paste0(loadpath, "panjiva.shipment.duns", ".rds"))
+panjiva.shipment.origname       <- readRDS(paste0(loadpath, "panjiva.shipment.origname", ".rds"))
+panjiva.shipment.cleanname      <- readRDS(paste0(loadpath, "panjiva.shipment.cleanname", ".rds"))
+
+# panjivadunsbgt
+duns               <- readRDS(paste0(loadpath, "duns", ".rds")) # 3
+bgt.plant.year.imp <- readRDS(paste0(loadpath, "bgt.plant.year.imp", ".rds")) # 2
+
+# dunsimport
+duns.import.year <- readRDS(paste0(loadpath, "duns.import.year", ".rds"))
+duns.import      <- readRDS(paste0(loadpath, "duns.import", ".rds"))
+
+# dunsimpute
+duns.plant.year.imp <- readRDS(paste0(loadpath, "duns.plant.year.imp", ".rds")) # 1
+
+# czone
+duns.plant.year.imp <- readRDS(paste0(loadpath, "duns.plant.year.imp", ".rds")) # 2
+bgt.plant.year.imp  <- readRDS(paste0(loadpath, "bgt.plant.year.imp", ".rds")) # 3
+
+# bgtdunsmatch
+bgt.names        <- readRDS(paste0(loadpath, "bgt.names", ".rds")) # 1
+duns.names       <- readRDS(paste0(loadpath, "duns.names", ".rds"))
+bgt.duns.matches <- readRDS(paste0(loadpath, "bgt.duns.matches", ".rds"))
+
+# bgtdunsstd
+bgt.names            <- readRDS(paste0(loadpath, "bgt.names", ".rds")) # 2
+bgt.duns.std         <- readRDS(paste0(loadpath, "bgt.duns.std", ".rds"))
+bgt.plant.year.imp   <- readRDS(paste0(loadpath, "bgt.plant.year.imp", ".rds")) # 4
+bgt.plant.naics.year <- readRDS(paste0(loadpath, "bgt.plant.naics.year", ".rds")) # 2
+```
+
+```{r function-clean_name}
+# Separator phrases
+separators <- c(
+  "T\\W?A", "TRADING\\s?AS", # Trading As
+  "F\\W?K\\W?A", "FORMERLY\\s?KNOWN\\s?AS", # Formerly Known As
+  "C\\s?/\\s?O", # Care of
+  "D\\W?B\\W?A", "DOING\\s?BUSINESS\\s?AS", # Doing Business As
+  "(A\\s)?DIVISIONS?\\sOF", 
+  "((IS\\s)?A\\s(WHOLLY\\sOWNED\\s)?)?SUBSIDIAR(Y|IES)\\sOF"
+)
+
+separators <- paste0("", paste(paste0("\\b(?<!^)(", separators, ")(?!$)\\b"), collapse = "|"), "")
+
+# These special characters need to be removed because they can mess up the clean-up code
+regex_special <- c("\\.", "\\\\", "\\|", "\\(", "\\)", "\\[", "\\]", "\\{", "\\}", "\\^", "\\$", "\\*", "\\+", "\\?")
+regex_special <- paste0("(", paste(regex_special, collapse = "|"), ")")
+
+# Common legal company forms to be removed
+legal.forms <- fread("custom_functions/legal.forms.csv")
+legal.forms <- paste0("(?i)(?<!^)\\b(AND\\s)?(", paste(legal.forms$regex, collapse = "|"), ")\\b")
+
+# The function
+clean_name <- function(name) {
+  # Remove punctuations
+  message("\rRemove punctuations\r", appendLF = TRUE)
+  name <- str_replace_all(name, "[[:punct:]]", " ")
+  name <- str_replace_all(name, regex_special, " ")
+  
+  # Remove legal forms
+  message("\rRemove legal forms\r", appendLF = TRUE)
+  name <- str_replace_all(name, legal.forms, " ") 
+  
+  # Trim excess spaces
+  message("\rTrim excess spaces\r", appendLF = TRUE)
+  name <- str_squish(name)
+  
+  return(name)
+}
+```
+
+```{r saving-panjiva_firms-panjiva_plants}
+# Get unique consignee names
+panjiva_firms <- panjiva_5hs %>%
+  distinct(Consignee) %>%
+  mutate(CLEANNAME = toupper(Consignee),
+         firmID    = row_number()) %>%
+  data.table() # 8,637
+
+# Split multiple consignee names
+panjiva_firms <- panjiva_firms[, .(CLEANNAME = unlist(strsplit(CLEANNAME, separators, perl = TRUE))), by = firmID] %>%
+  left_join(panjiva_firms[, !c("CLEANNAME")], by = "firmID") %>%
+  filter(!is.na(CLEANNAME) & CLEANNAME != "" & !is.na(Consignee) & Consignee != "") # 8,674
+
+# Clean consignee names
+panjiva_firms[, CLEANNAME := clean_name(CLEANNAME)]
+
+# Group shipments by unique DUNS number-consignee name-location
+panjiva_plants <- panjiva_5hs %>%
+  group_by(`Consignee D-U-N-S®`, Consignee, `Consignee Address`, `Consignee City`, 
+           `Consignee State/Region`, State, `Consignee Postal Code`, `Consignee Full Address`) %>%
+  summarise(
+    `Consignee Country`     = paste(unique(`Consignee Country`), collapse = "; "),
+    `Consignee SIC Codes`   = paste(unique(`Consignee SIC Codes`), collapse = "; "),
+    `Consignee Trade Roles` = paste(unique(`Consignee Trade Roles`), collapse="; "),
+    nshipments              = n(),
+    FirstShipment           = min(ArrivalYear, na.rm=TRUE),
+    LastShipment            = max(ArrivalYear, na.rm=TRUE),
+    nyears                  = n_distinct(ArrivalYear),
+    avg_annual_shipment     = n()/n_distinct(ArrivalYear),
+    ArrivalYears            = paste(sort(unique(ArrivalYear)), collapse="; "),
+    robot                   = max(robot, na.rm=TRUE),
+    robot_parts             = max(robot_parts, na.rm=TRUE),
+    robot_functions         = paste(unique(robot_functions[!is.na(robot_functions)]), collapse="; ")
+  ) %>%
+  mutate(
+    ConsigneeID = row_number(),
+    CONSIGNEE   = toupper(Consignee),
+    ADDRESS     = toupper(`Consignee Address`),
+    CITY        = toupper(`Consignee City`),
+    STATE       = toupper(`Consignee State/Region`)
+  ) %>%
+  ungroup() # 9,263
+
+# Merge with `panjiva_firms`
+panjiva_plants <- panjiva_plants %>%
+  left_join(panjiva_firms, by = "Consignee") %>%
+  mutate(firstletter = str_sub(CLEANNAME, 1, 1),
+         firstword   = word(CLEANNAME, 1)) %>%
+  data.table() # 9,309
+
+# Find zip codes from the complete address for those that are missing
+panjiva_plants[is.na(`Consignee Postal Code`), `Consignee Postal Code` := str_extract(`Consignee Full Address`, "\\b\\d{5}\\b")]
+
+# Add 3-digit zipcode
+panjiva_plants[, Zipcode3 := str_sub(str_pad(`Consignee Postal Code`, width = 5, pad = "0"), 1, 3)]
+
+# Show result
+head(panjiva_plants)
+
+# Save table
+saveRDS(panjiva_firms, paste0(savepath, "panjiva_firms.rds"))
+saveRDS(panjiva_plants, paste0(savepath, "panjiva_plants.rds"))
+```
+
+```{r saving-bgt_firms-bgt_plants-SKadded}
+# Get abbreviated state names
+SKILL.csv[State_abbreviation, 
+          on = .(State), 
+          state := i.Abbreviation]
+
+# Get unique employer names and convert to uppercase
+bgt_firms <- unique(SKILL.csv[, .(Employer)]) %>%
+  arrange(Employer) %>%
+  mutate(CLEANNAME = toupper(Employer),
+         firmID    = row_number()) %>%
+  data.table() # 318,362
+
+# Split multiple employer names
+bgt_firms <- bgt_firms[, .(CLEANNAME = unlist(strsplit(CLEANNAME, separators, perl = TRUE))), by = firmID] %>%
+  left_join(bgt_firms[, !c("CLEANNAME")], by = "firmID") %>%
+  data.table() # 319,737
+
+# Clean employer names
+bgt_firms[, CLEANNAME := clean_name(CLEANNAME)]
+
+# Get unique BGT plants
+bgt_plants <- SKILL.csv %>%
+  group_by(Employer, City, State, state, County, FIPS, Lat, Lon) %>%
+  summarise(firstYear  = min(Year),
+            lastYear   = max(Year),
+            npostings  = n(),
+            nUniqueSOC = n_distinct(SOC),
+            meanSalary = mean((MinSalary+MaxSalary)/2, na.rm=TRUE),
+            nSalary    = sum(!is.na(MinSalary)),
+            meanEdu    = mean(Edu, na.rm=TRUE),
+            nEdu       = sum(!is.na(Edu)),
+            meanExp    = mean(Exp, na.rm=TRUE),
+            nExp       = sum(!is.na(Exp)),
+            nSK         = paste(unique(SK), collapse = " ")) %>%
+  ungroup() %>%
+  mutate(plantID  = row_number(),
+         EMPLOYER = toupper(Employer),
+         CITY     = toupper(City),
+         COUNTY   = toupper(County),
+         STATE    = toupper(State)) # 1,661,168
+
+# Merge with bgt_firms
+bgt_plants <- bgt_plants %>%
+  left_join(bgt_firms[, .(Employer, CLEANNAME)], by = "Employer") %>%
+  mutate(firstletter = str_sub(CLEANNAME, 1, 1),
+         firstword   = word(CLEANNAME, 1)) %>%
+  data.table() # 1,664,597
+
+# Get zipcodes
+bgt_plants[
+  address, 
+  on = .(Lat=lat, Lon=long), 
+  `:=` (
+    zipcode  = str_pad(i.Postal, width = 5, pad = "0"), 
+    zipcode3 = str_sub(str_pad(i.Postal, width = 5, pad = "0"), 1, 3)
+  )]
+
+# Show result
+head(bgt_plants)
+
+# Save table
+saveRDS(bgt_firms, paste0(savepath, "bgt_firms.rds"))
+saveRDS(bgt_plants, paste0(savepath, "bgt_plants.rds"))
+
+head(bgt_plants$nSK)
+```
+
+```{r saving-duns_firms-duns_plants}
+# Get long state names
+State_abbreviation[, STATE := toupper(State)]
+duns[State_abbreviation, on = .(STATE = Abbreviation), State := i.STATE]
+
+# Get unique company names
+duns_firms <- unique(duns[, .(COMPANYNAME)]) %>%
+  arrange(COMPANYNAME) %>%
+  filter(COMPANYNAME != "") %>%
+  mutate(CLEANNAME = toupper(COMPANYNAME),
+         firmID    = row_number()) # 2,249,801
+
+# Split multiple company names
+duns_firms <- duns_firms[, .(CLEANNAME = unlist(strsplit(CLEANNAME, separators, perl = TRUE))), by = firmID] %>%
+  left_join(duns_firms[, !c("CLEANNAME")], by = "firmID") %>%
+  data.table() # 2,256,563
+
+# Clean company names
+duns_firms[, CLEANNAME := clean_name(CLEANNAME)]
+
+# Get unique D&B establishments
+duns_plants <- duns %>%
+  group_by(DUNSNO, COMPANYNAME, STREETADDRESS, CITY, STATE, State, ZIPCODE) %>%
+  summarise(firstYear = min(YEAR),
+            lastYear  = max(YEAR)) # 3,434,597
+
+# Merge with duns_firms
+duns_plants <- duns_plants %>%
+  left_join(duns_firms, by = "COMPANYNAME", relationship = "many-to-many") %>%
+  mutate(firstletter = str_sub(CLEANNAME, 1, 1),
+         firstword   = word(CLEANNAME, 1),
+         Zipcode3    = str_sub(str_pad(ZIPCODE, width = 5, pad = "0"), 1, 3)) %>%
+  data.table() # 3,444,127
+
+# Show result
+head(duns_plants)
+
+# Save table
+saveRDS(duns_firms, paste0(savepath, "duns_firms.rds"))
+saveRDS(duns_plants, paste0(savepath, "duns_plants.rds"))
+```
+
+```{r unique-duns-numbers}
+# Unique DUNS numbers from D&B and Panjiva
+duns.number <- unique(
+  rbind(
+    cbind(unique(duns[, .(DUNSNO, COMPANYNAME, STREETADDRESS, CITY, STATE, FULLADDRESS = paste(STREETADDRESS, CITY, STATE, ZIPCODE, sep=", "))]), source = "D&B"),
+    cbind(unique(panjiva_plants[, .(DUNSNO=`Consignee D-U-N-S®`, COMPANYNAME=CONSIGNEE, STREETADDRESS=ADDRESS, CITY, STATE=State, FULLADDRESS=toupper(`Consignee Full Address`))]), 
+          source = "Panjiva")
+  ))[order(DUNSNO)] # 2,482,387
+
+# Number of addresses for the same DUNSNO
+duns.number[duns.number[!is.na(DUNSNO), .(naddress = .N), keyby = .(DUNSNO)], on = .(DUNSNO), naddress := i.naddress]
+
+# List of missing addresses
+missing.address <- duns.number[(is.na(STREETADDRESS)|is.na(CITY)|is.na(STATE)) & !is.na(FULLADDRESS)] # 3,035
+
+# Geocode using OpenStreetMap
+#missing.address.arcgis <- missing.address %>%
+#  geocode(address = FULLADDRESS, method = "arcgis", full_results = TRUE, progress_bar = TRUE) %>%
+#  data.table()
+
+# Load file (to save time)
+missing.address.arcgis <- readRDS(paste0(loadpath, "missing.address.arcgis", ".rds"))
+
+# Filling in missing addresses
+duns.number[missing.address.arcgis, 
+            on = .(FULLADDRESS), 
+            `:=` (STREETADDRESS = ifelse(is.na(STREETADDRESS), toupper(i.attributes.StAddr), STREETADDRESS),
+                  CITY          = ifelse(is.na(CITY), toupper(i.attributes.City), CITY), 
+                  STATE         = ifelse(is.na(STATE), toupper(i.attributes.RegionAbbr), STATE))]
+
+duns.number[unique(duns.number[!is.na(FULLADDRESS), .(FULLADDRESS, STREETADDRESS, CITY, STATE)]), 
+            on = .(FULLADDRESS), 
+            `:=` (STREETADDRESS = ifelse(is.na(STREETADDRESS), i.STREETADDRESS, STREETADDRESS),
+                  CITY          = ifelse(is.na(CITY), i.CITY, CITY), 
+                  STATE         = ifelse(is.na(STATE), i.STATE, STATE))]
+
+# Filling in missing addresses in Panjiva
+panjiva_plants[duns.number, on = .(`Consignee D-U-N-S®` = DUNSNO, CONSIGNEE = COMPANYNAME), 
+               `:=` (ADDRESS = ifelse(is.na(ADDRESS), i.STREETADDRESS, ADDRESS), 
+                     CITY    = ifelse(is.na(CITY), i.CITY, CITY), 
+                     State   = ifelse(is.na(State), i.STATE, State))]
+
+## Convert full address to uppercase
+panjiva_plants[, FULLADDRESS := toupper(`Consignee Full Address`)]
+
+## Add address, city, and state
+panjiva_plants[unique(duns.number[!is.na(FULLADDRESS), .(FULLADDRESS, STREETADDRESS, CITY, STATE)]), 
+               on = .(FULLADDRESS), 
+               `:=` (ADDRESS = ifelse(is.na(ADDRESS), i.STREETADDRESS, ADDRESS), 
+                     CITY    = ifelse(is.na(CITY), i.CITY, CITY), 
+                     State   = ifelse(is.na(State), i.STATE, State))]
+
+# Show results
+## Remaining missing addresses
+duns.number[(is.na(STREETADDRESS)|is.na(CITY)|is.na(STATE))] # 16 (might change)
+
+## Panjiva plants without DUNS numbers
+nrow(panjiva_plants[is.na(`Consignee D-U-N-S®`)]) # 5804
+
+# Save results
+saveRDS(duns.number, paste0(savepath, "duns.number.rds"))
+saveRDS(missing.address.arcgis, paste0(savepath, "missing.address.arcgis.rds"))
+saveRDS(panjiva_plants, paste0(savepath, "panjiva_plants.rds"))
+```
+
+```{r saving-important-bgt-plants}
+# Impute 33 to missing NAICS
+SKILL.csv[is.na(NAICS3), NAICS3 := 33]
+
+# Aggregate to Employer-City-State-NAICS-Year level
+bgt.plant.naics.year <- SKILL.csv[
+  !is.na(Employer) & Employer != "", 
+  .(ngeo                = length(unique(paste(Lat, Lon, sep = ", "))),
+    geos                = paste0(unique(paste(Lat, Lon, sep = ", ")), collapse="; "),
+    nrobotic_production = sum(Robotics > 0 & Production > 0),
+    nrobotic_support    = sum(Robotics > 0 & Support > 0),
+    nrobotic            = sum(Robotics > 0),
+    All                 = sum(All > 0),
+    Production          = sum(Production > 0),
+    `High-skill`        = sum(`High-skill` > 0),
+    `Medium-skill`      = sum(`Medium-skill` > 0),
+    `Low-skill`         = sum(`Low-skill` > 0),
+    Direct              = sum(Direct > 0),
+    Support             = sum(Support > 0),
+    SK                  = paste(SK, collapse = ",")), # Takes all the SK strings (one per job posting) and joins them together into a single longer string; individual skills are separated by ,
+  keyby = .(EMPLOYER = toupper(Employer), CITY = toupper(City), state, NAICS3, Year)
+][, plant_naics_id := .GRP, keyby = .(EMPLOYER, CITY, state, NAICS3)] # 2,784,333
+
+head(bgt.plant.naics.year$SK)
+
+# Impute missing years
+## Generate missing years
+periods <- bgt.plant.naics.year[, .(Year = seq(min(Year), max(Year))), by = plant_naics_id] # 3,430,479
+
+## Merge with `bgt.plant.naics.year`
+bgt.plant.naics.year <- merge(periods, bgt.plant.naics.year, by = c("plant_naics_id", "Year"), all.x = TRUE) # 3,430,479
+
+## Fill in missing values
+cols <- c("EMPLOYER", "CITY", "state", "NAICS3")
+
+bgt.plant.naics.year <- bgt.plant.naics.year %>%
+  group_by(plant_naics_id) %>%
+  fill(cols, .direction = "down") %>%
+  data.table() # 3,430,479
+
+# Aggregate to Employer-City-State-Year level
+bgt.plant.year <- bgt.plant.naics.year[, .(
+  ngeo                = length(unique(unlist(strsplit(geos[!is.na(geos)], ";\\s*")))), 
+  geos                = paste(sort(unique(unlist(strsplit(geos[!is.na(geos)], ";\\s*")))), collapse = "; "),
+  nnaics              = sum(!is.na(NAICS3)),
+  NAICSs              = paste0(unique(NAICS3[!is.na(NAICS3)]), collapse = "; "),
+  nrobotic_production = sum(nrobotic_production, na.rm=TRUE),
+  nrobotic_support    = sum(nrobotic_support, na.rm=TRUE),
+  nrobotic            = sum(nrobotic, na.rm=TRUE),
+  All                 = sum(All, na.rm=TRUE),
+  Production          = sum(Production, na.rm=TRUE),
+  `High-skill`        = sum(`High-skill`, na.rm=TRUE),
+  `Medium-skill`      = sum(`Medium-skill`, na.rm=TRUE),
+  `Low-skill`         = sum(`Low-skill`, na.rm=TRUE),
+  Direct              = sum(Direct, na.rm=TRUE),
+  Support             = sum(Support, na.rm=TRUE),
+  SK                  = paste(SK, collapse = ",")), # Takes all the SK strings (one per job posting) and joins them together into a single longer string; individual skills are separated by ,
+  keyby = .(EMPLOYER, CITY, state, Year)
+][, plantid := .GRP, keyby = .(EMPLOYER, CITY, state)] # 3,330,170
+
+head(bgt.plant.year$SK)
+
+# Aggregate to Employer-City-State level
+bgt.plant <- bgt.plant.year[, .(
+  meangeo             = mean(ngeo),
+  geos                = paste(sort(unique(unlist(strsplit(geos, ";\\s*")))), collapse = "; "),
+  meannaics           = mean(nnaics),
+  NAICSs              = paste(sort(unique(unlist(strsplit(NAICSs, ";\\s*")))), collapse = "; "),
+  nyears              = max(Year) - min(Year) + 1,
+  minYear             = min(Year),
+  maxYear             = max(Year),
+  adopt.year.all      = Year[nrobotic > 0][which.min(Year)],
+  adopt.year.prod     = Year[nrobotic_production > 0][which.min(Year)],
+  adopt.year.support  = Year[nrobotic_support > 0][which.min(Year)],
+  firstpostings       = All[which.min(Year)],
+  nrobotic_production = sum(nrobotic_production, na.rm=TRUE),
+  nrobotic_support    = sum(nrobotic_support, na.rm=TRUE),
+  nrobotic            = sum(nrobotic, na.rm=TRUE),
+  All                 = sum(All, na.rm=TRUE),
+  Production          = sum(Production, na.rm=TRUE),
+  `High-skill`        = sum(`High-skill`, na.rm=TRUE),
+  `Medium-skill`      = sum(`Medium-skill`, na.rm=TRUE),
+  `Low-skill`         = sum(`Low-skill`, na.rm=TRUE),
+  Direct              = sum(Direct, na.rm=TRUE),
+  Support             = sum(Support, na.rm=TRUE),
+  SK                  = paste(SK, collapse = ",")),
+  keyby = .(plantid, EMPLOYER, CITY, state)] # 1,387,610
+
+head(bgt.plant$SK)
+
+# Get plant most frequent NAICS
+bgt.naics <- SKILL.csv[
+  !is.na(Employer) & Employer != "" & !is.na(NAICS3) & NAICS3 != "", 
+  .(npostings = sum(All > 0)), 
+  keyby = .(EMPLOYER = toupper(Employer), CITY = toupper(City), state, NAICS3)
+][
+  , .(NAICS3    = NAICS3[which.max(npostings)],
+      npostings = npostings[which.max(npostings)]), 
+  keyby = .(EMPLOYER, CITY, state)] # 1,387,610
+
+bgt.plant[bgt.naics, on = .(EMPLOYER, CITY, state), NAICS3 := i.NAICS3]
+
+# Impute missing values
+bgt.plant.year.imp <- impute_data(bgt.plant.year, 
+                                  id.var     = c("plantid"), 
+                                  impute.var = c("nrobotic_production", "nrobotic_support", "nrobotic", 
+                                                 "All", "Production", "High-skill", "Medium-skill", "Low-skill", "Direct", "Support","SK"), 
+                                  period     = "Year", 
+                                  method     = c("zero")) # 3,354,366
+
+# Impute missing plant-level values
+cols <- c("EMPLOYER", "CITY", "state", "meangeo", "meannaics", "NAICS3", "nyears", "minYear", "maxYear", "adopt.year.all", "adopt.year.prod", "adopt.year.support", "firstpostings")
+bgt.plant.year.imp[bgt.plant, on = .(plantid), (cols) := mget(paste0("i.", cols))]
+bgt.plant.year.imp[is.na(adopt.year.all), adopt.year.all := 0]
+bgt.plant.year.imp[is.na(adopt.year.prod), adopt.year.prod := 0]
+bgt.plant.year.imp[is.na(adopt.year.support), adopt.year.support := 0]
+
+# Plants with a single location in a city across years
+bgt.plant.year.imp[ngeo == 1, .N] # 2,443,176
+bgt.plant.year.imp[meangeo == 1, .N] # 1,579,489
+
+# Save table
+saveRDS(bgt.plant.naics.year, paste0(savepath, "bgt.plant.naics.year.rds"))
+saveRDS(bgt.plant.year, paste0(savepath, "bgt.plant.year.rds"))
+saveRDS(bgt.plant, paste0(savepath, "bgt.plant.rds"))
+saveRDS(bgt.naics, paste0(savepath, "bgt.naics.rds"))
+saveRDS(bgt.plant.year.imp, paste0(savepath, "bgt.plant.year.imp.rds"))
+```
+
+```{r duns-plants}
+# Impute missing years
+## Generate missing years
+periods <- duns[, .(YEAR = seq(min(YEAR), max(YEAR))), by = DUNSNO] # 19,358,199
+
+## Merge with `duns`
+duns <- merge(periods, duns, by = c("DUNSNO", "YEAR"), all.x = TRUE) # 19,358,199
+
+## Fill in missing values
+cols <- c("COMPANYNAME", "STREETADDRESS", "CITY", "STATE", "ZIPCODE", 
+          "SMSACODE", "YEARSTARTED", "SIC1", "SUBSIDIARYINDICATOR", "HQDUNSNO", 
+          "PARENTDUNSNO", "BUSINESSDESCRIPTION", "MANUFACTURING", "State")
+
+duns <- duns %>%
+  group_by(DUNSNO) %>%
+  fill(cols, .direction = "down") %>%
+  data.table() # 19,358,199
+
+# Get manufacturing NAICS codes
+duns[sic_to_naics[SIC_Code %between% c(2000, 3999) & NAICS_Code %between% c(300000, 399999)], 
+     on = .(SIC1 = SIC_Code), 
+     `:=` (NAICS6 = i.NAICS_Code, 
+           NAICS3 = str_sub(i.NAICS_Code, 1, 3))]
+
+# Aggregate to COMPANYNAME-CITY-STATE-NAICS-YEAR level
+duns.plant.naics.year <- duns[
+  !is.na(COMPANYNAME) & COMPANYNAME != "" & !is.na(NAICS3), 
+  .(nduns             = length(unique(DUNSNO)),
+    DUNSNOs           = paste0(unique(DUNSNO), collapse = "; "),
+    YEARSTARTED       = min(YEARSTARTED),
+    SLS               = sum(SLS, na.rm = TRUE),
+    EMPLOYEESTHISSITE = sum(EMPLOYEESTHISSITE, na.rm = TRUE)), 
+  keyby = .(COMPANYNAME, CITY, STATE, NAICS3, YEAR)
+][, `:=` (meanduns = mean(nduns), plant_naics_id = .GRP), 
+  keyby = .(COMPANYNAME, CITY, STATE, NAICS3)] # 17,019,929
+
+# Save table
+saveRDS(duns.plant.naics.year, paste0(savepath, "duns.plant.naics.year.rds"))
+
+# Aggregate to COMPANYNAME-CITY-STATE-YEAR level
+duns.plant.year <- duns.plant.naics.year[
+  , .(nduns             = length(unique(unlist(strsplit(DUNSNOs, ";\\s*")))), 
+      DUNSNOs           = paste(sort(unique(unlist(strsplit(DUNSNOs, ";\\s*")))), collapse = "; "),
+      nnaics            = .N,
+      NAICSs            = paste0(unique(NAICS3), collapse = "; "),
+      YEARSTARTED       = min(YEARSTARTED),
+      SLS               = sum(SLS),
+      EMPLOYEESTHISSITE = sum(EMPLOYEESTHISSITE)), 
+  keyby = .(COMPANYNAME, CITY, STATE, YEAR)
+][, `:=` (meanduns = mean(nduns), plantid = .GRP), keyby = .(COMPANYNAME, CITY, STATE)] # 16,958,206
+
+# Save table
+saveRDS(duns.plant.year, paste0(savepath, "duns.plant.year.rds"))
+
+# Aggregate to COMPANYNAME-CITY-STATE level
+duns.plant <- duns.plant.year[
+  , .(meanduns               = mean(nduns), 
+      DUNSNOs                = paste(sort(unique(unlist(strsplit(DUNSNOs, ";\\s*")))), collapse = "; "),
+      meannaics              = mean(nnaics),
+      NAICSs                 = paste(sort(unique(unlist(strsplit(NAICSs, ";\\s*")))), collapse = "; "),
+      nyears                 = max(YEAR) - min(YEAR) + 1,
+      minYear                = min(YEAR),
+      maxYear                = max(YEAR),
+      YEARSTARTED            = min(YEARSTARTED),
+      firstSLS               = SLS[which.min(YEAR)],
+      firstEMPLOYEESTHISSITE = EMPLOYEESTHISSITE[which.min(YEAR)],
+      meanSLS                = mean(SLS),
+      meanEMPLOYEESTHISSITE  = mean(EMPLOYEESTHISSITE)), 
+  keyby = .(plantid, COMPANYNAME, CITY, STATE)
+] # 2,587,541
+
+# Get real sales values in 2024
+duns.plant[annualPPI, on = .(minYear = Year), `:=` (
+  ppi              = i.real_value_2024,
+  realfirstSLS2024 = i.real_value_2024*firstSLS
+)]
+
+# Get plant most frequent NAICS
+duns.naics <- duns[
+  !is.na(COMPANYNAME) & COMPANYNAME != "" & !is.na(NAICS3), 
+  .(nduns = length(unique(DUNSNO))), 
+  keyby = .(COMPANYNAME, CITY, STATE, NAICS3)
+][
+  , .(NAICS3 = NAICS3[which.max(nduns)],
+      nduns  = nduns[which.max(nduns)]), 
+  keyby = .(COMPANYNAME, CITY, STATE)] # 2,587,541
+
+# Save table
+saveRDS(duns.naics, paste0(savepath, "duns.naics.rds"))
+
+# Add NAICS to `duns.plant`
+duns.plant[duns.naics, on = .(COMPANYNAME, CITY, STATE), NAICS3 := i.NAICS3]
+
+# Save table
+saveRDS(duns.plant, paste0(savepath, "duns.plant.rds"))
+saveRDS(duns, paste0(savepath, "duns.rds"))
+```
+
+```{r number-of-manufacturing-plants-per-year}
+## Since a firm may have non-manufacturing establishments (i.e., outside NAICS 31-33), this number does not represent all establishments.
+
+# Impute Headquarter DUNS number
+duns[, HQDUNSNO.imp := ifelse(is.na(HQDUNSNO), DUNSNO, HQDUNSNO)]
+
+# Calculating number of manufacturing plants per year
+# Processing time: 350s
+nplants <- duns[, .(nplants = length(unique(paste0(DUNSNO, ";", CITY, ";", STATE)))), 
+                by = .(HQDUNSNO.imp, YEAR)][order(-nplants)] # 17,548,234
+
+# Impute values in missing years with zero
+nplants <- impute_data(nplants, 
+                       id.var      = "HQDUNSNO.imp", 
+                       impute.var  = "nplants", 
+                       period      = "YEAR", 
+                       method      = "zero",
+                       impute.zero = TRUE) # 17,555,803
+
+# Add to duns
+duns[nplants, 
+     on = .(HQDUNSNO.imp, YEAR), 
+     `:=` (nplants = i.nplants_zero)]
+
+# Save table
+saveRDS(nplants, paste0(savepath, "nplants.rds"))
+saveRDS(duns, paste0(savepath, "duns.rds"))
+```
+
+```{r merging-with-panjiva}
+# Annual shipments
+## Filling in DUNSNO from D&B
+panjiva_5hs[unique(duns.number[!is.na(DUNSNO), .(DUNSNO, COMPANYNAME, STREETADDRESS, CITY, STATE)]), 
+               on = .(CONSIGNEE = COMPANYNAME, ADDRESS = STREETADDRESS, CITY = CITY, State = STATE), 
+               `:=` (`Consignee D-U-N-S®` = ifelse(is.na(`Consignee D-U-N-S®`), i.DUNSNO, `Consignee D-U-N-S®`))]
+
+# Filling in missing DUNSNO from Panjiva
+## Some shipments may miss DUNSNO even when they come from the same establishment.
+panjiva_5hs[panjiva_plants[!is.na(`Consignee D-U-N-S®`)][order(-nshipments)],
+               on = .(CONSIGNEE, ADDRESS, CITY, State),
+               `Consignee D-U-N-S®` := ifelse(is.na(`Consignee D-U-N-S®`), `i.Consignee D-U-N-S®`, `Consignee D-U-N-S®`)]
+
+# Get CLEANNAME
+panjiva_5hs[unique(panjiva_plants[!is.na(Consignee), .(Consignee, CLEANNAME)]), 
+            on = .(Consignee), 
+            CLEANNAME := i.CLEANNAME]
+
+# ================
+# Plant-year-level
+# ================
+
+# By DUNS Number
+panjiva.shipment.year.duns <- panjiva_5hs %>%
+  filter(
+    `Bill of Lading Type` != "Master" 
+    & !is.na(`Consignee D-U-N-S®`) & `Consignee D-U-N-S®` != "" 
+    & !is.na(`Consignee City`) & `Consignee City` != ""
+    & !is.na(State) & State != ""
+  ) %>%
+  rename(DUNSNO = `Consignee D-U-N-S®`) %>%
+  mutate(CITY = toupper(`Consignee City`)) %>%
+  group_by(DUNSNO, CITY, State, ArrivalYear) %>%
+  summarise(
+    Consignee               = paste0(unique(Consignee), collapse = "; "),
+    `Consignee Country`     = paste(unique(`Consignee Country`), collapse = "; "),
+    nfirms                  = length(unique(Consignee)),
+    nshipments              = n(),
+    volume_teu              = sum(`Volume (TEU)`, na.rm=TRUE),
+    weight_kg               = sum(`Weight (kg)`, na.rm=TRUE),
+    weight_ton              = sum(`Weight (t)`, na.rm=TRUE),
+    value_usd               = sum(`Value of Goods (USD)`, na.rm=TRUE),
+    ncontainers             = sum(`Number of Containers`, na.rm=TRUE),
+    robot                   = max(robot, na.rm=TRUE),
+    robot_parts             = max(robot_parts, na.rm=TRUE),
+    robot_functions         = paste(unique(robot_functions[!is.na(robot_functions)]), collapse="; ")
+  ) %>%
+  ungroup() %>%
+  data.table() # 4,017
+
+# Save table
+saveRDS(panjiva.shipment.year.duns, paste0(savepath, "panjiva.shipment.year.duns.rds"))
+
+# By original name
+panjiva.shipment.year.origname <- panjiva_5hs %>%
+  filter(
+    `Bill of Lading Type` != "Master" 
+    & !is.na(Consignee) & Consignee != "" 
+    & !is.na(`Consignee City`) & `Consignee City` != ""
+    & !is.na(State) & State != ""
+  ) %>%
+  rename(DUNSNO = `Consignee D-U-N-S®`) %>%
+  mutate(CONSIGNEE = toupper(Consignee),
+         CITY      = toupper(`Consignee City`)) %>%
+  group_by(CONSIGNEE, CITY, State, ArrivalYear) %>%
+  summarise(
+    DUNSNO                  = paste0(unique(DUNSNO), collapse = "; "),
+    `Consignee Country`     = paste(unique(`Consignee Country`), collapse = "; "),
+    nduns                   = length(unique(DUNSNO)),
+    nshipments              = n(),
+    volume_teu              = sum(`Volume (TEU)`, na.rm=TRUE),
+    weight_kg               = sum(`Weight (kg)`, na.rm=TRUE),
+    weight_ton              = sum(`Weight (t)`, na.rm=TRUE),
+    value_usd               = sum(`Value of Goods (USD)`, na.rm=TRUE),
+    ncontainers             = sum(`Number of Containers`, na.rm=TRUE),
+    robot                   = max(robot, na.rm=TRUE),
+    robot_parts             = max(robot_parts, na.rm=TRUE),
+    robot_functions         = paste(unique(robot_functions[!is.na(robot_functions)]), collapse="; ")
+  ) %>%
+  ungroup() %>%
+  data.table() # 7,722
+
+# Save table
+saveRDS(panjiva.shipment.year.origname, paste0(savepath, "panjiva.shipment.year.origname.rds"))
+
+# By CLEANNAME
+panjiva.shipment.year.cleanname <- panjiva_5hs %>%
+  filter(
+    `Bill of Lading Type` != "Master" 
+    & !is.na(CLEANNAME) & CLEANNAME != "" 
+    & !is.na(`Consignee City`) & `Consignee City` != ""
+    & !is.na(State) & State != ""
+  ) %>%
+  rename(DUNSNO = `Consignee D-U-N-S®`) %>%
+  mutate(CONSIGNEE = toupper(Consignee),
+         CITY      = toupper(`Consignee City`)) %>%
+  group_by(CLEANNAME, CITY, State, ArrivalYear) %>%
+  summarise(
+    DUNSNO                  = paste0(unique(DUNSNO), collapse = "; "),
+    `Consignee Country`     = paste(unique(`Consignee Country`), collapse = "; "),
+    nduns                   = length(unique(DUNSNO)),
+    nshipments              = n(),
+    volume_teu              = sum(`Volume (TEU)`, na.rm=TRUE),
+    weight_kg               = sum(`Weight (kg)`, na.rm=TRUE),
+    weight_ton              = sum(`Weight (t)`, na.rm=TRUE),
+    value_usd               = sum(`Value of Goods (USD)`, na.rm=TRUE),
+    ncontainers             = sum(`Number of Containers`, na.rm=TRUE),
+    robot                   = max(robot, na.rm=TRUE),
+    robot_parts             = max(robot_parts, na.rm=TRUE),
+    robot_functions         = paste(unique(robot_functions[!is.na(robot_functions)]), collapse="; ")
+  ) %>%
+  ungroup() %>%
+  data.table() # 7,713
+
+# Save table
+saveRDS(panjiva.shipment.year.cleanname, paste0(savepath, "panjiva.shipment.year.cleanname.rds"))
+
+# ===========
+# Plant-level
+# ===========
+
+# By DUNS Number
+panjiva.shipment.duns <- panjiva_5hs %>%
+  filter(
+    `Bill of Lading Type` != "Master" 
+    & !is.na(`Consignee D-U-N-S®`) & `Consignee D-U-N-S®` != "" 
+    & !is.na(`Consignee City`) & `Consignee City` != ""
+    & !is.na(State) & State != ""
+  ) %>%
+  rename(DUNSNO = `Consignee D-U-N-S®`) %>%
+  mutate(CITY = toupper(`Consignee City`)) %>%
+  group_by(DUNSNO, CITY, State) %>%
+  summarise(
+    FirstShipment       = min(ArrivalYear),
+    LastShipment        = max(ArrivalYear),
+    total_shipments     = n(),
+    total_volume_teu    = sum(`Volume (TEU)`, na.rm=TRUE),
+    total_weight_kg     = sum(`Weight (kg)`, na.rm=TRUE),
+    total_weight_ton    = sum(`Weight (t)`, na.rm=TRUE),
+    total_value_usd     = sum(`Value of Goods (USD)`, na.rm=TRUE),
+    total_containers    = sum(`Number of Containers`, na.rm=TRUE),
+    nyears_shipments    = length(unique(ArrivalYear)),
+    shipment_years      = paste0(sort(unique(ArrivalYear[!is.na(ArrivalYear)])), collapse = "; "),
+    firstyear_shipments = sum(ArrivalYear == min(ArrivalYear)),
+    robot               = max(robot),
+    robot_parts         = max(robot_parts)
+  ) %>%
+  ungroup() %>%
+  data.table() # 2,153
+
+# Save table
+saveRDS(panjiva.shipment.duns, paste0(savepath, "panjiva.shipment.duns.rds"))
+
+# By original name
+panjiva.shipment.origname <- panjiva_5hs %>%
+  filter(
+    `Bill of Lading Type` != "Master" 
+    & !is.na(Consignee) & Consignee != "" 
+    & !is.na(`Consignee City`) & `Consignee City` != ""
+    & !is.na(State) & State != ""
+  ) %>%
+  rename(DUNSNO = `Consignee D-U-N-S®`) %>%
+  mutate(CONSIGNEE = toupper(Consignee),
+         CITY      = toupper(`Consignee City`)) %>%
+  group_by(CONSIGNEE, CITY, State) %>%
+  summarise(
+    DUNSNO              = paste0(unique(DUNSNO), collapse = "; "),
+    nduns               = length(unique(DUNSNO)),
+    FirstShipment       = min(ArrivalYear),
+    LastShipment        = max(ArrivalYear),
+    total_shipments     = n(),
+    total_volume_teu    = sum(`Volume (TEU)`, na.rm=TRUE),
+    total_weight_kg     = sum(`Weight (kg)`, na.rm=TRUE),
+    total_weight_ton    = sum(`Weight (t)`, na.rm=TRUE),
+    total_value_usd     = sum(`Value of Goods (USD)`, na.rm=TRUE),
+    total_containers    = sum(`Number of Containers`, na.rm=TRUE),
+    nyears_shipments    = length(unique(ArrivalYear)),
+    shipment_years      = paste0(sort(unique(ArrivalYear[!is.na(ArrivalYear)])), collapse = "; "),
+    firstyear_shipments = sum(ArrivalYear == min(ArrivalYear)),
+    robot               = max(robot),
+    robot_parts         = max(robot_parts)
+  ) %>%
+  ungroup() %>%
+  data.table() # 5,154
+
+# Save result
+saveRDS(panjiva.shipment.origname, paste0(savepath, "panjiva.shipment.origname.rds"))
+
+# By CLEANNAME
+panjiva.shipment.cleanname <- panjiva_5hs %>%
+  filter(
+    `Bill of Lading Type` != "Master" 
+    & !is.na(CLEANNAME) & CLEANNAME != "" 
+    & !is.na(`Consignee City`) & `Consignee City` != ""
+    & !is.na(State) & State != ""
+  ) %>%
+  rename(DUNSNO = `Consignee D-U-N-S®`) %>%
+  mutate(CONSIGNEE = toupper(Consignee),
+         CITY      = toupper(`Consignee City`)) %>%
+  group_by(CLEANNAME, CITY, State) %>%
+  summarise(
+    DUNSNO              = paste0(unique(DUNSNO), collapse = "; "),
+    nduns               = length(unique(DUNSNO)),
+    FirstShipment       = min(ArrivalYear),
+    LastShipment        = max(ArrivalYear),
+    total_shipments     = n(),
+    total_volume_teu    = sum(`Volume (TEU)`, na.rm=TRUE),
+    total_weight_kg     = sum(`Weight (kg)`, na.rm=TRUE),
+    total_weight_ton    = sum(`Weight (t)`, na.rm=TRUE),
+    total_value_usd     = sum(`Value of Goods (USD)`, na.rm=TRUE),
+    total_containers    = sum(`Number of Containers`, na.rm=TRUE),
+    nyears_shipments    = length(unique(ArrivalYear)),
+    shipment_years      = paste0(sort(unique(ArrivalYear[!is.na(ArrivalYear)])), collapse = "; "),
+    firstyear_shipments = sum(ArrivalYear == min(ArrivalYear)),
+    robot               = max(robot),
+    robot_parts         = max(robot_parts)
+  ) %>%
+  ungroup() %>%
+  data.table() # 5,135
+
+# Save result
+saveRDS(panjiva.shipment.cleanname, paste0(savepath, "panjiva.shipment.cleanname.rds"))
+```
+
+```{r merging-panjiva-duns-bgt}
+# ===============
+# Merge with DUNS
+# ===============
+# Add company clean names
+duns[duns_firms, on = .(COMPANYNAME), CLEANNAME := i.CLEANNAME]
+
+# Create placeholders
+duns[, `:=` (
+  nshipments           = as.integer(NA), 
+  robot.year           = as.integer(NA), 
+  robot_parts.year     = as.integer(NA), 
+  robot_functions.year = as.character(NA),
+  FirstShipment        = as.integer(NA),
+  LastShipment         = as.integer(NA),
+  total_shipments      = as.integer(NA),
+  nyears_shipments     = as.integer(NA),
+  shipment_years       = as.character(NA),
+  firstyear_shipments  = as.integer(NA),
+  robot                = as.integer(NA),
+  robot_parts          = as.integer(NA)
+)]
+
+# Plant-year level
+## We start from the least reliable method first (matching by clean name)
+## By clean name
+duns[panjiva.shipment.year.cleanname[nduns == 1], 
+     on = .(CLEANNAME = CLEANNAME, CITY = CITY, STATE = State, YEAR = ArrivalYear), 
+     `:=` (
+       matchmethod_panjiva.shipment.year = "clean name",
+       nshipments                        = ifelse(!is.na(nshipments), nshipments, i.nshipments), 
+       robot.year                        = ifelse(!is.na(robot.year), robot.year, i.robot), 
+       robot_parts.year                  = ifelse(!is.na(robot_parts.year), robot_parts.year, i.robot_parts), 
+       robot_functions.year              = ifelse(!is.na(robot_functions.year), robot_functions.year, i.robot_functions)
+       )]
+
+## By original name
+duns[panjiva.shipment.year.origname[nduns == 1], 
+     on = .(COMPANYNAME = CONSIGNEE, CITY = CITY, STATE = State, YEAR = ArrivalYear), 
+     `:=` (
+       matchmethod_panjiva.shipment.year = "original name",
+       nshipments                        = ifelse(!is.na(nshipments), nshipments, i.nshipments), 
+       robot.year                        = ifelse(!is.na(robot.year), robot.year, i.robot), 
+       robot_parts.year                  = ifelse(!is.na(robot_parts.year), robot_parts.year, i.robot_parts), 
+       robot_functions.year              = ifelse(!is.na(robot_functions.year), robot_functions.year, i.robot_functions)
+     )]
+
+## By DUNS number
+duns[panjiva.shipment.year.duns, 
+     on = .(DUNSNO = DUNSNO, CITY = CITY, STATE = State, YEAR = ArrivalYear), 
+     `:=` (
+       matchmethod_panjiva.shipment.year = "DUNS number",
+       nshipments                        = i.nshipments, 
+       robot.year                        = i.robot, 
+       robot_parts.year                  = i.robot_parts, 
+       robot_functions.year              = i.robot_functions
+     )]
+
+# Plant level
+## We start from the least reliable method first (matching by clean name)
+## By cleanname
+duns[panjiva.shipment.cleanname[nduns == 1], 
+     on = .(CLEANNAME = CLEANNAME, CITY = CITY, STATE = State), 
+     `:=` (
+       matchmethod_panjiva.shipment = "clean name",
+       FirstShipment                = ifelse(!is.na(FirstShipment), FirstShipment, i.FirstShipment), 
+       LastShipment                 = ifelse(!is.na(LastShipment), LastShipment, i.LastShipment), 
+       total_shipments              = ifelse(!is.na(total_shipments), total_shipments, i.total_shipments),  
+       nyears_shipments             = ifelse(!is.na(nyears_shipments), nyears_shipments, i.nyears_shipments),
+       shipment_years               = ifelse(!is.na(shipment_years), shipment_years, i.shipment_years),
+       firstyear_shipments          = ifelse(!is.na(firstyear_shipments), firstyear_shipments, i.firstyear_shipments),
+       robot                        = ifelse(!is.na(robot), robot, i.robot),
+       robot_parts                  = ifelse(!is.na(robot_parts), robot_parts, i.robot_parts)
+     )]
+
+## By original name
+duns[panjiva.shipment.origname[nduns == 1], 
+     on = .(COMPANYNAME = CONSIGNEE, CITY = CITY, STATE = State), 
+     `:=` (
+       matchmethod_panjiva.shipment = "original name",
+       FirstShipment                = ifelse(!is.na(FirstShipment), FirstShipment, i.FirstShipment), 
+       LastShipment                 = ifelse(!is.na(LastShipment), LastShipment, i.LastShipment), 
+       total_shipments              = ifelse(!is.na(total_shipments), total_shipments, i.total_shipments),  
+       nyears_shipments             = ifelse(!is.na(nyears_shipments), nyears_shipments, i.nyears_shipments),
+       shipment_years               = ifelse(!is.na(shipment_years), shipment_years, i.shipment_years),
+       firstyear_shipments          = ifelse(!is.na(firstyear_shipments), firstyear_shipments, i.firstyear_shipments),
+       robot                        = ifelse(!is.na(robot), robot, i.robot),
+       robot_parts                  = ifelse(!is.na(robot_parts), robot_parts, i.robot_parts)
+     )]
+
+## By DUNS number
+duns[panjiva.shipment.duns, 
+     on = .(DUNSNO = DUNSNO, CITY = CITY, STATE = State), 
+     `:=` (
+       matchmethod_panjiva.shipment = "DUNS number",
+       FirstShipment       = i.FirstShipment,
+       LastShipment        = i.LastShipment,
+       total_shipments     = i.total_shipments,
+       nyears_shipments    = i.nyears_shipments,
+       shipment_years      = i.shipment_years,
+       firstyear_shipments = i.firstyear_shipments,
+       robot               = i.robot,
+       robot_parts         = i.robot_parts
+     )]
+
+# ===============
+# Merge with BGT
+# ===============
+# Add uppercase Employer
+bgt_firms[, EMPLOYER := toupper(Employer)]
+
+# Add clean names
+bgt.plant.year.imp[bgt_firms, on = .(EMPLOYER), CLEANNAME := i.CLEANNAME]
+
+# Create placeholders
+bgt.plant.year.imp[, `:=` (
+  nshipments           = as.integer(NA), 
+  robot.year           = as.integer(NA), 
+  robot_parts.year     = as.integer(NA), 
+  robot_functions.year = as.character(NA),
+  FirstShipment        = as.integer(NA),
+  LastShipment         = as.integer(NA),
+  total_shipments      = as.integer(NA),
+  nyears_shipments     = as.integer(NA),
+  shipment_years       = as.character(NA),
+  firstyear_shipments  = as.integer(NA),
+  robot                = as.integer(NA),
+  robot_parts          = as.integer(NA)
+)]
+
+# Plant-year variables
+## By clean name
+bgt.plant.year.imp[panjiva.shipment.year.cleanname, 
+     on = .(CLEANNAME = CLEANNAME, CITY = CITY, state = State, Year = ArrivalYear), 
+     `:=` (
+       matchmethod_panjiva.shipment.year = "clean name",
+       nshipments                        = ifelse(!is.na(nshipments), nshipments, i.nshipments), 
+       robot.year                        = ifelse(!is.na(robot.year), robot.year, i.robot), 
+       robot_parts.year                  = ifelse(!is.na(robot_parts.year), robot_parts.year, i.robot_parts), 
+       robot_functions.year              = ifelse(!is.na(robot_functions.year), robot_functions.year, i.robot_functions)
+     )]
+
+## By original name
+bgt.plant.year.imp[panjiva.shipment.year.origname, 
+     on = .(EMPLOYER = CONSIGNEE, CITY = CITY, state = State, Year = ArrivalYear), 
+     `:=` (
+       matchmethod_panjiva.shipment.year = "original name",
+       nshipments                        = ifelse(!is.na(nshipments), nshipments, i.nshipments), 
+       robot.year                        = ifelse(!is.na(robot.year), robot.year, i.robot), 
+       robot_parts.year                  = ifelse(!is.na(robot_parts.year), robot_parts.year, i.robot_parts), 
+       robot_functions.year              = ifelse(!is.na(robot_functions.year), robot_functions.year, i.robot_functions)
+     )]
+
+# Plant variables
+## By clean name
+bgt.plant.year.imp[panjiva.shipment.cleanname, 
+     on = .(CLEANNAME = CLEANNAME, CITY = CITY, state = State), 
+     `:=` (
+       matchmethod_panjiva.shipment = "clean name",
+       FirstShipment                = ifelse(!is.na(FirstShipment), FirstShipment, i.FirstShipment), 
+       LastShipment                 = ifelse(!is.na(LastShipment), LastShipment, i.LastShipment), 
+       total_shipments              = ifelse(!is.na(total_shipments), total_shipments, i.total_shipments),  
+       nyears_shipments             = ifelse(!is.na(nyears_shipments), nyears_shipments, i.nyears_shipments),
+       shipment_years               = ifelse(!is.na(shipment_years), shipment_years, i.shipment_years),
+       firstyear_shipments          = ifelse(!is.na(firstyear_shipments), firstyear_shipments, i.firstyear_shipments),
+       robot                        = ifelse(!is.na(robot), robot, i.robot),
+       robot_parts                  = ifelse(!is.na(robot_parts), robot_parts, i.robot_parts)
+     )]
+
+## By original name
+bgt.plant.year.imp[panjiva.shipment.origname, 
+     on = .(EMPLOYER = CONSIGNEE, CITY = CITY, state = State), 
+     `:=` (
+       matchmethod_panjiva.shipment = "original name",
+       FirstShipment                = ifelse(!is.na(FirstShipment), FirstShipment, i.FirstShipment), 
+       LastShipment                 = ifelse(!is.na(LastShipment), LastShipment, i.LastShipment), 
+       total_shipments              = ifelse(!is.na(total_shipments), total_shipments, i.total_shipments),  
+       nyears_shipments             = ifelse(!is.na(nyears_shipments), nyears_shipments, i.nyears_shipments),
+       shipment_years               = ifelse(!is.na(shipment_years), shipment_years, i.shipment_years),
+       firstyear_shipments          = ifelse(!is.na(firstyear_shipments), firstyear_shipments, i.firstyear_shipments),
+       robot                        = ifelse(!is.na(robot), robot, i.robot),
+       robot_parts                  = ifelse(!is.na(robot_parts), robot_parts, i.robot_parts)
+     )]
+
+# Show result
+table(duns$YEAR[!is.na(duns$matchmethod_panjiva.shipment)], duns$matchmethod_panjiva.shipment[!is.na(duns$matchmethod_panjiva.shipment)])
+#       clean name DUNS number original name
+#  2003        400         337            47
+#  2004        426         355            55
+#  2005        473         366            59
+#  2006        504         381            63
+#  2007        552         402            67
+#  2008        579         413            73
+#  2009        579         437            83
+#  2010        604         467            92
+#  2011        662         487           105
+#  2012        674         501           115
+#  2013        686         519           120
+#  2014        694         522           133
+#  2015        712         531           147
+#  2016        746         532           156
+#  2017        787         539           160
+#  2018        812         553           168
+#  2019        790         539           160
+#  2020        792         529           167
+#  2021        813         519           172
+#  2022        815         514           170
+#  2023        840         507           174
+#  2024        833         498           166
+
+table(duns$YEAR[!is.na(duns$matchmethod_panjiva.shipment.year)], duns$matchmethod_panjiva.shipment.year[!is.na(duns$matchmethod_panjiva.shipment.year)])
+#       clean name DUNS number original name
+#  2007         36          23             6
+#  2008         57          47            11
+#  2009         26          37             7
+#  2010         42          44             3
+#  2011         60          37            11
+#  2012         47          50            12
+#  2013         61          62            13
+#  2014         72          58            15
+#  2015         59          69            18
+#  2016         72          77            17
+#  2017         95          71            26
+#  2018        117          78            19
+#  2019        119          81            25
+#  2020         79          85            21
+#  2021         53          52            28
+#  2022        104          73            13
+#  2023        159          79            26
+#  2024        138          68            38
+
+# Save table
+saveRDS(duns, paste0(savepath, "duns.rds"))
+saveRDS(bgt.plant.year.imp, paste0(savepath, "bgt.plant.year.imp.rds"))
+```
+
+```{r dunsimport}
+# Fill in missing values with zero
+cols <- c("nshipments", "robot.year", "robot_parts.year", "FirstShipment", "LastShipment", 
+          "total_shipments", "nyears_shipments", "firstyear_shipments", "robot", "robot_parts")
+duns[, (cols) := lapply(.SD, function(x) ifelse(is.na(x), 0, x)), .SDcols = cols]
+
+# Aggregate data
+## Plant-year level
+duns.import.year <- duns[
+  !is.na(COMPANYNAME) & COMPANYNAME != ""
+  & matchmethod_panjiva.shipment.year != "clean name" # remove this line to include match by clean name (see row 255)
+  , .(
+    nduns.year           = length(unique(DUNSNO)),
+    nshipments           = sum(nshipments, na.rm = TRUE),
+    robot.year           = if (all(is.na(robot.year))) as.integer(0) else max(robot.year, na.rm = TRUE),
+    robot_parts.year     = if (all(is.na(robot_parts.year))) as.integer(0) else max(robot_parts.year, na.rm = TRUE),
+    robot_functions.year = paste0(unique(robot_functions.year), collapse = "; ")
+  ),
+  keyby = .(COMPANYNAME, CITY, STATE, YEAR)] # 19,004,375 (with clean name)
+
+duns.import.year[,  `:=` (firstyear_robot      = first(robot.year), 
+                          firstyear_robotparts = first(robot_parts.year)), 
+                 keyby = .(COMPANYNAME, CITY, STATE)]
+
+# Save table
+saveRDS(duns.import.year, paste0(savepath, "duns.import.year.rds"))
+
+## Plant-level
+duns.import <- duns[
+  !is.na(COMPANYNAME) & COMPANYNAME != ""
+  & matchmethod_panjiva.shipment != "clean name" # remove this line to include match by clean name (see row 255)
+  , .(
+    nduns               = length(unique(DUNSNO)),
+    FirstShipment       = if (all(is.na(FirstShipment))) as.integer(0) else min(FirstShipment, na.rm = TRUE),
+    LastShipment        = if (all(is.na(LastShipment))) as.integer(0) else max(LastShipment, na.rm = TRUE),
+    nyears_shipments    = if (all(is.na(shipment_years))) as.integer(0) else length(unlist(unique(strsplit(shipment_years, ";\\s*")))),
+    shipment_years      = paste(sort(unlist(unique(strsplit(shipment_years, ";\\s*")))), collapse = "; "),
+    firstyear_shipments = nshipments[which.min(FirstShipment)],
+    robot               = if (all(is.na(robot))) NA else max(robot, na.rm = TRUE),
+    robot_parts         = if (all(is.na(robot_parts))) NA else max(robot_parts, na.rm = TRUE)
+  ),
+  keyby = .(COMPANYNAME, CITY, STATE)] # 2,406,264
+
+# Show result
+duns.import[, .(nplants = .N), keyby = .(FirstShipment)]
+
+# Save table
+saveRDS(duns.import, paste0(savepath, "duns.import.rds"))
+```
+
+```{r dunsimpute, warning=FALSE}
+# Impute missing values
+duns.plant.year.imp <- impute_data(duns.plant.year, 
+                                   id.var      = "plantid", 
+                                   impute.var  = c("SLS", "EMPLOYEESTHISSITE"), 
+                                   period      = "YEAR", 
+                                   method      = "linear",
+                                   impute.zero = TRUE) # 17,045,498
+
+# Convert sales to 2024 value
+duns.plant.year.imp[annualPPI, 
+                    on = .(YEAR = Year), 
+                    `:=` (ppi                = i.real_value_2024,
+                          realSLS2024_linear = i.real_value_2024*SLS_linear)]
+
+# Round the values
+duns.plant.year.imp[, `:=` (EMPLOYEESTHISSITE_linear = round(EMPLOYEESTHISSITE_linear),
+                            realSLS2024_linear       = round(realSLS2024_linear))]
+
+# Add log form of employment and sales
+duns.plant.year.imp[, `:=` (logEmp_linear = log(EMPLOYEESTHISSITE_linear),
+                            logSales      = log(realSLS2024_linear))]
+
+# Get plant-year-level variables
+cols1 <- c(
+  "COMPANYNAME", "CITY", "STATE", "YEAR",
+  "nshipments", "robot.year", "robot_parts.year", "robot_functions.year", "firstyear_robot", "firstyear_robotparts"
+)
+
+duns.plant.year.imp[duns.import.year, 
+                    on = .(COMPANYNAME, CITY, STATE, YEAR), 
+                    (cols1) := mget(paste0("i.", cols1))]
+
+# Get plant-level variables
+cols2 <- c(
+  "COMPANYNAME", "CITY", "STATE", "DUNSNOs", "NAICSs", "NAICS3",
+  "meanduns", "meannaics", "nyears", 
+  "minYear", "maxYear", "YEARSTARTED", "firstSLS", "firstEMPLOYEESTHISSITE"
+)
+
+duns.plant.year.imp[duns.plant, 
+                    on = .(plantid), 
+                    (cols2) := mget(paste0("i.", cols2))]
+
+# Get plant-level import variables
+cols3 <- c(
+  "COMPANYNAME", "CITY", "STATE", 
+  "FirstShipment", "LastShipment", "nyears_shipments", "shipment_years", "firstyear_shipments", "robot", "robot_parts"
+)
+
+duns.plant.year.imp[duns.import[COMPANYNAME != ""], 
+                    on = .(COMPANYNAME, CITY, STATE), 
+                    (cols3) := mget(paste0("i.", cols3))]
+
+# Show result
+dcast(duns.plant.year.imp[FirstShipment > minYear & FirstShipment <= maxYear & meanduns <= 1 & nyears_shipments <= 1], 
+      plantid + DUNSNOs + COMPANYNAME + CITY + STATE + meanduns + FirstShipment ~ YEAR, 
+      value.var = "EMPLOYEESTHISSITE_linear") # 614
+
+# Save table
+saveRDS(duns.plant.year.imp, paste0(savepath, "duns.plant.year.imp.rds"))
+```
+
+```{r czone}
+# Get county for each city based on the largest population
+## This is performed because a city may be located in multiple counties.
+city_county <- zipcode %>%
+  mutate(CITY = toupper(primary_city)) %>%
+  group_by(CITY, state, county) %>%
+  summarise(irs_estimated_population = sum(irs_estimated_population)) %>%
+  ungroup() %>%
+  arrange(desc(irs_estimated_population)) %>%
+  group_by(CITY, state) %>%
+  summarise(county = first(county),
+            COUNTY = toupper(first(county))) %>%
+  data.table() # 29,784
+
+# Split county and state into two variables
+county_cz[, c("county", "state") := tstrsplit(`County Name`, ", ", fixed = TRUE)]
+
+# Add leading zero to CZ and convert county to uppercase
+county_cz[, `:=` (`LMA/CZ` = str_pad(`LMA/CZ`, 5, pad = 0),
+                  COUNTY   = toupper(county))]
+
+# Change county names
+change_county <- data.table(before = c("ST\\.?"), 
+                            after  = c("SAINT"))
+
+for (i in 1:nrow(change_county)) {
+  county_cz[, COUNTY := str_replace_all(COUNTY, change_county[[1]][i], change_county[[2]][i])]
+  city_county[, COUNTY := str_replace_all(COUNTY, change_county[[1]][i], change_county[[2]][i])]
+}
+
+# Add commuting zones
+city_county[county_cz, on = .(COUNTY, state), `:=` (CZ1990 = `i.LMA/CZ`, FIPS = i.FIPS)]
+
+# Select Autor and Dorn data from year 2007
+autor_data <- as.data.table(autor[autor$yr == 2007, c("czone", "popwkage", "avlnhrw")]) # 722
+
+# Add leading zero to commuting zone
+autor_data[, czone := str_pad(czone, 5, pad = 0)]
+
+# Merge `city_county` and `autor_data`
+autor_data <- merge(city_county, autor_data, by.x = "CZ1990", by.y = "czone") # 29,211
+
+# Add CZ data to `duns.plant.year.imp`
+duns.plant.year.imp[autor_data, 
+                    on = .(CITY = CITY, STATE = state), 
+                    `:=` (czone    = i.CZ1990,
+                          popwkage = i.popwkage, 
+                          avlnhrw  = i.avlnhrw)]
+
+# Add CZ data to `bgt.plant.year.imp`
+bgt.plant.year.imp[autor_data, 
+                   on = .(CITY = CITY, state = state), 
+                   `:=` (czone    = i.CZ1990,
+                         popwkage = i.popwkage, 
+                         avlnhrw  = i.avlnhrw)]
+
+# Show result
+city_county[is.na(CZ1990) & state %in% state.abb][order(state)] # 173 CITIES missing CZ and FIPS
+length(unique(autor_data$CZ1990)) # 722
+autor_data[, .(`Counties covered` = paste(unique(county), collapse = "; ")), keyby = .(CZ1990)]
+
+# Save table
+saveRDS(duns.plant.year.imp, paste0(savepath, "duns.plant.year.imp.rds"))
+saveRDS(bgt.plant.year.imp, paste0(savepath, "bgt.plant.year.imp.rds"))
+```
+
+```{r bgtdunsmatch, eval=FALSE}
+# Unique BGT Employer names by year
+bgt.names <- unique(bgt.plant.year[, .(EMPLOYER)]) # 318,358
+bgt.names[, `:=` (EMPLOYER2 = str_squish(str_replace_all(EMPLOYER, regex_special, " ")),
+                  EMPLOYER3 = clean_name(EMPLOYER))]
+bgt.names[, `:=` (firstword = word(EMPLOYER3, 1))]
+
+# Unique DUNS COMPANYNAME by year
+duns.names <- unique(duns.plant.year[, .(COMPANYNAME)]) # 1,772,018
+duns.names[, `:=` (COMPANYNAME2 = str_squish(str_replace_all(COMPANYNAME, regex_special, " ")),
+                   COMPANYNAME3 = clean_name(COMPANYNAME))]
+duns.names[, `:=` (firstword    = word(COMPANYNAME3, 1))]
+
+# Warning: This may take hours to process
+bgt.duns.matches <- match_name(bgt.names, 
+                               duns.names, 
+                               cols1          = c("EMPLOYER2", "EMPLOYER3", "firstword"), 
+                               cols2          = c("COMPANYNAME2", "COMPANYNAME3", "firstword"),
+                               original.match = TRUE, 
+                               clean.match    = TRUE, 
+                               fuzzy.match    = FALSE)
+
+# Save table
+saveRDS(bgt.names, paste0(savepath, "bgt.names.rds"))
+saveRDS(duns.names, paste0(savepath, "duns.names.rds"))
+saveRDS(bgt.duns.matches, paste0(savepath, "bgt.duns.matches.rds"))
+```
+
+```{r bgtdunsstd}
+# Reload data (to save time)
+bgt.duns.matches <- readRDS("../data/created-here/2025-07-20/bgt.duns.matches.rds")
+bgt.names        <- readRDS("../data/created-here/2025-07-20/bgt.names.rds")
+
+# Matched names
+bgt.duns.std <- bgt.duns.matches$matches
+
+# Exclude matches with 1 and 2 words, except 3M (becase many are incorrect matches)
+bgt.duns.std <- bgt.duns.std[grepl("\\b3M\\b", group, ignore.case=TRUE, perl=TRUE) | 
+                               !match_type %in% c(
+                                 #"2: exact_by_clean_name", "4: exact_by_partof_clean_3", # Remove this line to get June 22 results
+                                 #"4: exact_by_partof_clean_4", "4: exact_by_partof_clean_5", # Remove this line to get June 22 results
+                                 "3: exact_by_partof_original_0", "4: exact_by_partof_clean_0", 
+                                 "3: exact_by_partof_original_1", "4: exact_by_partof_clean_1",
+                                 "3: exact_by_partof_original_2", "4: exact_by_partof_clean_2"
+                               )] # 190,053
+
+# Calculate JW distance between BGT employers and D&B company names
+bgt.duns.std[, distance := stringdist(firm1, firm2, method = "jw")]
+
+# Get D&B company names
+# If there are more than one matches, get the one with the smallest JW distance
+bgt.names[bgt.duns.std[order(distance)], 
+          on = .(EMPLOYER2 = firm1), 
+          `:=` (COMPANYNAME.duns = i.firm2)]
+
+# Get D&B company names
+## To `bgt.plant.year.imp`
+bgt.plant.year.imp[bgt.names, 
+                   on = .(EMPLOYER), 
+                   `:=` (COMPANYNAME.duns = i.COMPANYNAME.duns)]
+
+## To `bgt.plant.naics.year`
+bgt.plant.naics.year[bgt.names, 
+                   on = .(EMPLOYER), 
+                   `:=` (COMPANYNAME.duns = i.COMPANYNAME.duns)]
+
+# Save table
+saveRDS(bgt.names, paste0(savepath, "bgt.names.rds"))
+saveRDS(bgt.duns.std, paste0(savepath, "bgt.duns.std.rds"))
+saveRDS(bgt.plant.year.imp, paste0(savepath, "bgt.plant.year.imp.rds"))
+saveRDS(bgt.plant.naics.year, paste0(savepath, "bgt.plant.naics.year.rds"))
+```
+
+End of script
